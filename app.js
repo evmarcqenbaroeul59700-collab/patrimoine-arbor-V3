@@ -666,14 +666,21 @@ del.onclick = async () => {
   const t = getTreeById(selectedId);
   if (!t) return;
 
-  await postToGAS({
-    action: "deletePhoto",
-    treeId: t.id,
-    photoDriveId: photo.driveId
-  });
+  const res = await postToGAS({
+  action: "deletePhoto",
+  treeId: t.id,
+  photoDriveId: photo.driveId
+});
 
-  await loadTreesFromSheets();
-  persistAndRefresh(t.id);
+if (res?.ok && res.result?.status === "PHOTO_DELETED") {
+  alert("📸 Photo retirée avec succès");
+} else {
+  alert("❌ Erreur lors de la suppression de la photo");
+}
+
+await loadTreesFromSheets();
+persistAndRefresh(t.id);
+
 };
 
 
@@ -948,17 +955,21 @@ const stampedDataUrl = await stampPhotoWithMeta(
     latEl().value = "";
     lngEl().value = "";
   }
-
-  renderGallery([]);
 }
 
+ function setSelected(id) {
 
-  function setSelected(id) {
-    
-pendingPhotos = [];
+  // 🔥 RESET COMPLET DES PHOTOS (OBLIGATOIRE)
+  renderGallery([]);
+  carouselPhotos = [];
+  carouselIndex = 0;
+  document.getElementById("photoCarousel")?.classList.add("hidden");
 
-    selectedId = id;
-    const t = id ? getTreeById(id) : null;
+  pendingPhotos = [];
+  selectedId = id;
+
+  const t = id ? getTreeById(id) : null;
+
 
     if (!t) {
       editorTitle().textContent = "Ajouter un arbre";
@@ -1939,4 +1950,62 @@ window.exportAnnuelPDF = async function () {
     alert("Erreur export PDF annuel");
   }
 };
+
+// =========================
+// 📄 EXPORT PDF — FEUILLES MÉTIER
+// =========================
+window.exportSurveillancePDF = async function () {
+  if (!isAdmin()) {
+    alert("Action réservée à l’administrateur");
+    return;
+  }
+
+  const res = await postToGAS({
+    action: "exportSurveillancePDF"
+  });
+
+  if (res?.ok && res.fileUrl) {
+    window.open(res.fileUrl, "_blank");
+  } else {
+    console.error(res);
+    alert("Erreur export PDF Arbres à surveiller");
+  }
+};
+
+window.exportAbattagesPDF = async function () {
+  if (!isAdmin()) {
+    alert("Action réservée à l’administrateur");
+    return;
+  }
+
+  const res = await postToGAS({
+    action: "exportAbattagesPDF"
+  });
+
+  if (res?.ok && res.fileUrl) {
+    window.open(res.fileUrl, "_blank");
+  } else {
+    console.error(res);
+    alert("Erreur export PDF Abattages");
+  }
+};
+
+window.exportElagagesPDF = async function () {
+  if (!isAdmin()) {
+    alert("Action réservée à l’administrateur");
+    return;
+  }
+
+  const res = await postToGAS({
+    action: "exportElagagesPDF"
+  });
+
+  if (res?.ok && res.fileUrl) {
+    window.open(res.fileUrl, "_blank");
+  } else {
+    console.error(res);
+    alert("Erreur export PDF Élagages");
+  }
+};
+
 
