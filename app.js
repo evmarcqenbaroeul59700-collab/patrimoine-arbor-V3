@@ -1180,6 +1180,7 @@ function locateUserGPS() {
       timeout: 20000
     }
   );
+}
 
   // ⏱️ après 10 secondes → calcul moyenne
   setTimeout(() => {
