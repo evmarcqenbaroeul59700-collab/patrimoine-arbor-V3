@@ -72,6 +72,9 @@ var it = null;
   let pendingPhotos = [];
 let authToken = localStorage.getItem("authToken");
 
+  // 🔒 GPS verrouillé (position figée au clic GPS)
+let lockedGpsLat = null;
+let lockedGpsLng = null;
 // ------------------------------
 // 🔐 Déconnexion
 // ------------------------------
@@ -1144,47 +1147,44 @@ function locateUserGPS() {
     return;
   }
 
-  navigator.geolocation.getCurrentPosition(
-    (position) => {
-      const lat = position.coords.latitude;
-      const lng = position.coords.longitude;
+ navigator.geolocation.getCurrentPosition(
+  (position) => {
+    const lat = position.coords.latitude;
+    const lng = position.coords.longitude;
 
-      // 🗺️ centre la carte
-      map.setView([lat, lng], 17);
+    // 🔒 VERROUILLAGE GPS
+    lockedGpsLat = lat;
+    lockedGpsLng = lng;
 
-      // ✏️ prépare une nouvelle fiche
-      selectedId = null;
-      deleteBtn().disabled = true;
+    // 🗺️ centre la carte
+    map.setView([lat, lng], 17);
 
-      editorTitle().textContent = "Ajouter un arbre (GPS)";
-      editorHint().textContent = "Position GPS détectée automatiquement.";
+    selectedId = null;
+    deleteBtn().disabled = true;
 
-      clearForm(false);
-      latEl().value = fmtCoord(lat);
-      lngEl().value = fmtCoord(lng);
+    editorTitle().textContent = "Ajouter un arbre (GPS)";
+    editorHint().textContent = "Position GPS verrouillée.";
 
-      renderTreePreview(null);
-      highlightListSelection();
+    clearForm(false);
 
-      // 📍 marqueur temporaire
-      L.circleMarker([lat, lng], {
-        radius: 8,
-        color: "#00e5ff",
-        fillColor: "#00e5ff",
-        fillOpacity: 0.9
-      }).addTo(map);
+    // ✅ champs figés
+    latEl().value = fmtCoord(lat);
+    lngEl().value = fmtCoord(lng);
 
-    },
-    (err) => {
-      alert("Impossible d’obtenir la position GPS.");
-      console.error(err);
-    },
-    {
-      enableHighAccuracy: true,
-      timeout: 10000,
-      maximumAge: 0
-    }
-  );
+    renderTreePreview(null);
+    highlightListSelection();
+  },
+  (err) => {
+    alert("Impossible d’obtenir la position GPS.");
+    console.error(err);
+  },
+  {
+    enableHighAccuracy: true,
+    timeout: 10000,
+    maximumAge: 0
+  }
+);
+
 }
 
   // =========================
