@@ -1525,7 +1525,10 @@ if (selectedId) {
   photoStatus.textContent = "";
 
   alert("Arbre mis à jour.");
-  return;
+lockedGpsLat = null;
+lockedGpsLng = null;
+return;
+
 }
 
 
@@ -1560,6 +1563,9 @@ pendingPhotos = [];
       galleryInput.value = "";
       photoStatus.textContent = "";
       alert("Arbre ajouté.");
+      lockedGpsLat = null;
+      lockedGpsLng = null;
+
     };
   }
 async function loadTreesFromSheets() {
