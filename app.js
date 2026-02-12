@@ -1199,7 +1199,7 @@ function locateUserGPS() {
     map = L.map("map", {
       zoomControl: true,
       minZoom: 13,
-      maxZoom: 21,
+      maxZoom: 20,
     }).setView(MARCQ_CENTER, 14);
 
     
