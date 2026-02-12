@@ -63,6 +63,11 @@ var it = null;
   // =========================
   let gpsWatchId = null;
   let bestGpsFix = null;
+  let gpsWatchId = null;
+let gpsSamples = [];
+let lockedGpsLat = null;
+let lockedGpsLng = null;
+
   let map;
   let quartiersLayer = null;
   let cityLayer = null;
@@ -74,9 +79,7 @@ var it = null;
   let pendingPhotos = [];
 let authToken = localStorage.getItem("authToken");
 
-  // 🔒 GPS verrouillé (position figée au clic GPS)
-let lockedGpsLat = null;
-let lockedGpsLng = null;
+ 
 // ------------------------------
 // 🔐 Déconnexion
 // ------------------------------
@@ -1148,27 +1151,24 @@ function locateUserGPS() {
     return;
   }
 
-  bestGpsFix = null;
+  gpsSamples = [];
 
-  // 🔄 écoute continue du GPS
+  editorTitle().textContent = "Recherche position GPS…";
+  editorHint().textContent = "Stabilisation GPS (10 secondes)";
+
   gpsWatchId = navigator.geolocation.watchPosition(
     (position) => {
       const { latitude, longitude, accuracy } = position.coords;
 
-      // garder la position la PLUS PRÉCISE
-      if (!bestGpsFix || accuracy < bestGpsFix.accuracy) {
-        bestGpsFix = {
-          lat: latitude,
-          lng: longitude,
-          accuracy
-        };
+      // ignorer GPS trop imprécis
+      if (accuracy > 25) return;
 
-        // feedback visuel
-        latEl().value = latitude.toFixed(6);
-        lngEl().value = longitude.toFixed(6);
+      gpsSamples.push({ lat: latitude, lng: longitude, accuracy });
 
-        map.setView([latitude, longitude], 18);
-      }
+      // feedback en direct
+      latEl().value = latitude.toFixed(6);
+      lngEl().value = longitude.toFixed(6);
+      map.setView([latitude, longitude], 18);
     },
     (err) => {
       console.error(err);
@@ -1177,9 +1177,46 @@ function locateUserGPS() {
     {
       enableHighAccuracy: true,
       maximumAge: 0,
-      timeout: 15000
+      timeout: 20000
     }
   );
+
+  // ⏱️ après 10 secondes → calcul moyenne
+  setTimeout(() => {
+    navigator.geolocation.clearWatch(gpsWatchId);
+    gpsWatchId = null;
+
+    if (gpsSamples.length === 0) {
+      alert("GPS insuffisamment précis. Réessaye.");
+      return;
+    }
+
+    // 🧮 moyenne
+    const avg = gpsSamples.reduce(
+      (acc, p) => {
+        acc.lat += p.lat;
+        acc.lng += p.lng;
+        acc.count++;
+        return acc;
+      },
+      { lat: 0, lng: 0, count: 0 }
+    );
+
+    lockedGpsLat = avg.lat / avg.count;
+    lockedGpsLng = avg.lng / avg.count;
+
+    // verrouillage définitif
+    latEl().value = lockedGpsLat.toFixed(6);
+    lngEl().value = lockedGpsLng.toFixed(6);
+
+    editorTitle().textContent = "Ajouter un arbre (GPS verrouillé)";
+    editorHint().textContent =
+      `Position GPS verrouillée (moyenne sur ${avg.count} mesures)`;
+
+    console.log("GPS verrouillé (moyenne)", lockedGpsLat, lockedGpsLng);
+  }, 10000);
+}
+
 
   // ⏱️ après 5 secondes → on verrouille
   setTimeout(() => {
