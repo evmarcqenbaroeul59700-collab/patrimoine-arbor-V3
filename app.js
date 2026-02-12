@@ -61,8 +61,7 @@ var it = null;
   // =========================
   // GLOBAL STATE
   // =========================
-  let gpsWatchId = null;
-  let bestGpsFix = null;
+ 
   let gpsWatchId = null;
 let gpsSamples = [];
 let lockedGpsLat = null;
@@ -1160,12 +1159,10 @@ function locateUserGPS() {
     (position) => {
       const { latitude, longitude, accuracy } = position.coords;
 
-      // ignorer GPS trop imprécis
-      if (accuracy > 25) return;
+      if (accuracy > 25) return; // filtre imprécis
 
       gpsSamples.push({ lat: latitude, lng: longitude, accuracy });
 
-      // feedback en direct
       latEl().value = latitude.toFixed(6);
       lngEl().value = longitude.toFixed(6);
       map.setView([latitude, longitude], 18);
@@ -1180,9 +1177,8 @@ function locateUserGPS() {
       timeout: 20000
     }
   );
-}
 
-  // ⏱️ après 10 secondes → calcul moyenne
+  // ⏱️ verrouillage après 10 secondes
   setTimeout(() => {
     navigator.geolocation.clearWatch(gpsWatchId);
     gpsWatchId = null;
@@ -1192,7 +1188,6 @@ function locateUserGPS() {
       return;
     }
 
-    // 🧮 moyenne
     const avg = gpsSamples.reduce(
       (acc, p) => {
         acc.lat += p.lat;
@@ -1206,42 +1201,19 @@ function locateUserGPS() {
     lockedGpsLat = avg.lat / avg.count;
     lockedGpsLng = avg.lng / avg.count;
 
-    // verrouillage définitif
     latEl().value = lockedGpsLat.toFixed(6);
     lngEl().value = lockedGpsLng.toFixed(6);
 
     editorTitle().textContent = "Ajouter un arbre (GPS verrouillé)";
     editorHint().textContent =
-      `Position GPS verrouillée (moyenne sur ${avg.count} mesures)`;
+      `Position GPS verrouillée (${avg.count} mesures)`;
 
-    console.log("GPS verrouillé (moyenne)", lockedGpsLat, lockedGpsLng);
+    console.log("GPS verrouillé", lockedGpsLat, lockedGpsLng);
   }, 10000);
 }
 
 
-  // ⏱️ après 5 secondes → on verrouille
-  setTimeout(() => {
-    if (gpsWatchId !== null) {
-      navigator.geolocation.clearWatch(gpsWatchId);
-      gpsWatchId = null;
-    }
 
-    if (!bestGpsFix) {
-      alert("Position GPS non fiable");
-      return;
-    }
-
-    // 🔒 VERROUILLAGE DÉFINITIF
-    lockedGpsLat = bestGpsFix.lat;
-    lockedGpsLng = bestGpsFix.lng;
-
-    editorTitle().textContent = "Ajouter un arbre (GPS verrouillé)";
-    editorHint().textContent =
-      `Position GPS verrouillée (±${Math.round(bestGpsFix.accuracy)} m)`;
-
-    console.log("GPS verrouillé :", bestGpsFix);
-  }, 5000);
-}
 
 
   // =========================
