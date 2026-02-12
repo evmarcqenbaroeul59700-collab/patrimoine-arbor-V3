@@ -61,6 +61,8 @@ var it = null;
   // =========================
   // GLOBAL STATE
   // =========================
+  let gpsWatchId = null;
+  let bestGpsFix = null;
   let map;
   let quartiersLayer = null;
   let cityLayer = null;
@@ -1141,51 +1143,68 @@ function addOrUpdateMarker(t) {
 // 📍 GEOLOCALISATION GPS
 // =========================
 function locateUserGPS() {
-
   if (!navigator.geolocation) {
-    alert("La géolocalisation n’est pas supportée sur cet appareil.");
+    alert("La géolocalisation n’est pas supportée.");
     return;
   }
 
- navigator.geolocation.getCurrentPosition(
-  (position) => {
-    const lat = position.coords.latitude;
-    const lng = position.coords.longitude;
+  bestGpsFix = null;
 
-    // 🔒 VERROUILLAGE GPS
-    lockedGpsLat = lat;
-    lockedGpsLng = lng;
+  // 🔄 écoute continue du GPS
+  gpsWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      const { latitude, longitude, accuracy } = position.coords;
 
-    // 🗺️ centre la carte
-    map.setView([lat, lng], 17);
+      // garder la position la PLUS PRÉCISE
+      if (!bestGpsFix || accuracy < bestGpsFix.accuracy) {
+        bestGpsFix = {
+          lat: latitude,
+          lng: longitude,
+          accuracy
+        };
 
-    selectedId = null;
-    deleteBtn().disabled = true;
+        // feedback visuel
+        latEl().value = latitude.toFixed(6);
+        lngEl().value = longitude.toFixed(6);
 
-    editorTitle().textContent = "Ajouter un arbre (GPS)";
-    editorHint().textContent = "Position GPS verrouillée.";
+        map.setView([latitude, longitude], 18);
+      }
+    },
+    (err) => {
+      console.error(err);
+      alert("Erreur GPS");
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 15000
+    }
+  );
 
-    clearForm(false);
+  // ⏱️ après 5 secondes → on verrouille
+  setTimeout(() => {
+    if (gpsWatchId !== null) {
+      navigator.geolocation.clearWatch(gpsWatchId);
+      gpsWatchId = null;
+    }
 
-    // ✅ champs figés
-    latEl().value = fmtCoord(lat);
-    lngEl().value = fmtCoord(lng);
+    if (!bestGpsFix) {
+      alert("Position GPS non fiable");
+      return;
+    }
 
-    renderTreePreview(null);
-    highlightListSelection();
-  },
-  (err) => {
-    alert("Impossible d’obtenir la position GPS.");
-    console.error(err);
-  },
-  {
-    enableHighAccuracy: true,
-    timeout: 10000,
-    maximumAge: 0
-  }
-);
+    // 🔒 VERROUILLAGE DÉFINITIF
+    lockedGpsLat = bestGpsFix.lat;
+    lockedGpsLng = bestGpsFix.lng;
 
+    editorTitle().textContent = "Ajouter un arbre (GPS verrouillé)";
+    editorHint().textContent =
+      `Position GPS verrouillée (±${Math.round(bestGpsFix.accuracy)} m)`;
+
+    console.log("GPS verrouillé :", bestGpsFix);
+  }, 5000);
 }
+
 
   // =========================
   // INIT
