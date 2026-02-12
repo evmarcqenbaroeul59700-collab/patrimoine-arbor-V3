@@ -1188,18 +1188,20 @@ function locateUserGPS() {
       return;
     }
 
-    const avg = gpsSamples.reduce(
-      (acc, p) => {
-        acc.lat += p.lat;
-        acc.lng += p.lng;
-        acc.count++;
-        return acc;
-      },
-      { lat: 0, lng: 0, count: 0 }
-    );
+   const weighted = gpsSamples.reduce(
+  (acc, p) => {
+    const w = 1 / (p.accuracy * p.accuracy);
+    acc.lat += p.lat * w;
+    acc.lng += p.lng * w;
+    acc.w += w;
+    return acc;
+  },
+  { lat: 0, lng: 0, w: 0 }
+);
 
-    lockedGpsLat = avg.lat / avg.count;
-    lockedGpsLng = avg.lng / avg.count;
+lockedGpsLat = weighted.lat / weighted.w;
+lockedGpsLng = weighted.lng / weighted.w;
+
 
     latEl().value = lockedGpsLat.toFixed(6);
     lngEl().value = lockedGpsLng.toFixed(6);
