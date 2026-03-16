@@ -308,6 +308,8 @@ window.postToGAS = postToGAS;
     if (focusId) setSelected(focusId);
   }
 
+  window.persistAndRefresh = persistAndRefresh;
+
 async function syncToSheets(treeObj) {
   try {
     const payload = { ...treeObj };
@@ -333,10 +335,20 @@ await loadTreesFromSheets();
   // =========================
   // ICONS / COLORS
   // =========================
-function createTreeIcon(color = "#4CAF50", etat = "") {
+function createTreeIcon(color = "#4CAF50", etat = "", validationEntreprise = false) {
   const g = "g_" + Math.random().toString(36).slice(2);
 
   let badge = "";
+let cross = "";
+
+if (validationEntreprise === true) {
+  cross = `
+    <line x1="18" y1="18" x2="46" y2="46"
+          stroke="white" stroke-width="4"/>
+    <line x1="46" y1="18" x2="18" y2="46"
+          stroke="white" stroke-width="4"/>
+  `;
+}
 
  if (etat === "Dangereux (A abattre)") {
  badge = `
@@ -382,6 +394,8 @@ function createTreeIcon(color = "#4CAF50", etat = "") {
         <circle cx="32" cy="24" r="18" fill="url(#${g})"/>
         <circle cx="20" cy="30" r="14" fill="url(#${g})"/>
         <circle cx="44" cy="30" r="14" fill="url(#${g})"/>
+
+        ${cross}
 
         <!-- tronc -->
         <rect x="28" y="38" width="8" height="18" rx="2" fill="#6D4C41"/>
@@ -1036,10 +1050,11 @@ renderTreePreview(t);
 function addOrUpdateMarker(t) {
   let m = markers.get(t.id);
 
-  const icon = createTreeIcon(
-    getColorFromSecteur(t.secteur),
-    t.etat
-  );
+ const icon = createTreeIcon(
+  getColorFromSecteur(t.secteur),
+  t.etat,
+  t.validationEntreprise === true
+);
 
   if (!m) {
     m = L.marker([t.lat, t.lng], { icon }).addTo(map);
