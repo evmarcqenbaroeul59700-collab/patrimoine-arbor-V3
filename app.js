@@ -148,6 +148,10 @@ let isAuthenticated = !!authToken;
 function isAdmin() {
   return (localStorage.getItem("userRole") || "").toLowerCase() === "admin";
 }
+
+function isEntreprisePerilhon(){
+  return localStorage.getItem("userSecteur") === "Perilhon";
+}
 window.isAdmin = isAdmin; // ✅ AJOUT CRITIQUE
 
 
@@ -948,7 +952,10 @@ const stampedDataUrl = await stampPhotoWithMeta(
         map.setView([t.lat, t.lng], Math.max(map.getZoom(), 16));
         const m = markers.get(t.id);
         if (m) m.openPopup();
-        if(!isAdmin() && isPastilleTree(t)) { alert('⛔ Arbre verrouillé (pastille) : sélection réservée admin'); return; }
+      if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
+  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+  return;
+}
         setSelected(t.id);
         highlightListSelection();
       };
@@ -957,7 +964,10 @@ const stampedDataUrl = await stampPhotoWithMeta(
 
       item.onclick = (e) => {
         if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === "button") return;
-        if(!isAdmin() && isPastilleTree(t)) { alert('⛔ Arbre verrouillé (pastille) : sélection réservée admin'); return; }
+       if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
+  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+  return;
+}
         setSelected(t.id);
         highlightListSelection();
       };
@@ -1100,7 +1110,10 @@ function addOrUpdateMarker(t) {
     m = L.marker([t.lat, t.lng], { icon }).addTo(map);
 
     m.on("click", () => {
-      if(!isAdmin() && isPastilleTree(t)) { alert('⛔ Arbre verrouillé (pastille) : sélection réservée admin'); return; }
+      if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
+  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+  return;
+}
         setSelected(t.id);
       highlightListSelection();
     });
@@ -1622,7 +1635,10 @@ if (undoBtn) {
     renderMarkers();
     renderList();
     renderSecteurCount();
-    if(!isAdmin() && isPastilleTree(t)) { alert('⛔ Arbre verrouillé (pastille) : sélection réservée admin'); return; }
+    if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
+  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+  return;
+}
         setSelected(t.id);
 
     // 🔗 restauration Google Sheets
