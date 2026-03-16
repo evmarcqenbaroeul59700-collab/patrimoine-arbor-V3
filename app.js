@@ -126,16 +126,21 @@ function isPastilleTree(t){
 // 🔐 FILTRAGE PAR SECTEUR (FRONT)
 // =========================
 function getVisibleTrees() {
-  const role = localStorage.getItem("userRole");
-  const secteurUser = localStorage.getItem("userSecteur");
+  const role = (localStorage.getItem("userRole") || "").toLowerCase();
+  const secteurUser = (localStorage.getItem("userSecteur") || "").toLowerCase();
 
   // 👑 Admin → tout voir
   if (role === "admin") {
     return trees;
   }
 
-  // 👤 Compte secteur → uniquement son secteur
-  return trees.filter(t => t.secteur === secteurUser);
+  // 🏢 Entreprise Perilhon → tout voir
+  if (role === "entreprise" && secteurUser === "perilhon") {
+    return trees;
+  }
+
+  // 👤 Comptes secteur → uniquement leur secteur
+  return trees.filter(t => (t.secteur || "").toLowerCase() === secteurUser);
 }
 
 
