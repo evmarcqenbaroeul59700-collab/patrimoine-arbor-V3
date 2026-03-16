@@ -1039,6 +1039,7 @@ const stampedDataUrl = await stampPhotoWithMeta(
 
   pendingPhotos = [];
   selectedId = id;
+  window.selectedId = id;
 
   const t = id ? getTreeById(id) : null;
 
