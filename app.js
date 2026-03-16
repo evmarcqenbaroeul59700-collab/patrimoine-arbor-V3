@@ -1,4 +1,37 @@
 
+/* ===== VALIDATION ENTREPRISE ===== */
+function wireValidationEntreprise() {
+  const btn = document.getElementById("btnValidationEntreprise");
+  if (!btn) return;
+
+  // visible seulement admin + Perilhon
+  const role = (localStorage.getItem("userRole") || "").toLowerCase();
+  const secteur = (localStorage.getItem("userSecteur") || "").toLowerCase();
+
+  const canValidate =
+    role === "admin" ||
+    (role === "entreprise" && secteur === "perilhon");
+
+  if (!canValidate) {
+    btn.style.display = "none";
+    return;
+  }
+
+  btn.onclick = () => {
+    if (!window.selectedId) {
+      alert("Sélectionne un arbre");
+      return;
+    }
+
+    const t = window.getTreeById(window.selectedId);
+    if (!t) return;
+
+    t.validationEntreprise = true;
+    window.persistAndRefresh(t.id);
+
+    alert("✅ Travaux validés par l'entreprise");
+  };
+}
 /* ===== VALIDER INTERVENTION ===== */
 function wireValidateIntervention() {
   const btn = document.getElementById("btnValiderIntervention");
@@ -292,6 +325,8 @@ window.postToGAS = postToGAS;
   function getTreeById(id) {
     return trees.find((t) => t.id === id);
   }
+
+  window.getTreeById = getTreeById;
 
   function loadTrees() {
     try {
@@ -1799,8 +1834,9 @@ async function startApp() {
   initMap();
   addLegendToMap();
   wireUI();
-  wireValidateIntervention();
-  applyTravauxLock();
+wireValidationEntreprise();
+wireValidateIntervention();
+applyTravauxLock();
 
   await loadQuartiersGeoJSON();
   await loadCityContourAndLock();
