@@ -2142,29 +2142,123 @@ window.exportArbrePDF = async function (id) {
   }
 };
 
-window.exportAnnuelPDF = async function () {
-  const year = document.getElementById("yearSelect")?.value;
+let annualPdfExportInProgress = false;
 
-  if (!year) {
-    alert("Veuillez choisir une année");
-    return;
+window.exportAnnuelPDF = async function () {
+  if (annualPdfExportInProgress) return;
+
+  const input = document.getElementById("yearSelect");
+  const yearText = (input?.value || "").trim();
+  const year = Number(yearText);
+  const button = document.getElementById("exportAnnuelBtn");
+  const status = document.getElementById("annualPdfStatus");
+  const download = document.getElementById("annualPdfDownload");
+  const showError = message => {
+    if (status) status.textContent = message;
+    alert(message);
+  };
+
+  if (!yearText) return showError("Veuillez choisir une année.");
+  if (!Number.isInteger(year) || year < 2000 || year > 2900) {
+    return showError("Veuillez saisir une année entière entre 2000 et 2900.");
+  }
+  if (!window.isAdmin?.()) {
+    return showError("L’export PDF annuel est réservé à l’administrateur.");
+  }
+  if (!localStorage.getItem("authToken")) {
+    return showError("Votre session a expiré. Reconnectez-vous pour exporter le PDF annuel.");
   }
 
-  try {
-    const res = await window.postToGAS({
-      action: "exportAnnuelPDF",
-      year: year
-    });
+  annualPdfExportInProgress = true;
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Préparation du PDF…";
+  }
+  if (download) {
+    download.hidden = true;
+    download.removeAttribute("href");
+  }
+  if (status) status.textContent = `Préparation du PDF annuel ${year}…`;
 
-    if (!res || !res.ok || !res.fileUrl) {
-      console.error(res);
-      return alert("Erreur export annuel");
+  // Ouvrir pendant le clic : les navigateurs mobiles peuvent bloquer
+  // une nouvelle fenêtre ouverte seulement après la réponse du serveur.
+  let pdfWindow = null;
+  try {
+    try {
+      pdfWindow = window.open("about:blank", "_blank");
+      if (pdfWindow) {
+        pdfWindow.opener = null;
+        pdfWindow.document.title = `PDF annuel ${year}`;
+        pdfWindow.document.body.textContent = `Préparation du PDF annuel ${year}…`;
+      }
+    } catch {
+      // Le lien reste disponible dans la fiche si les fenêtres sont bloquées.
     }
 
-    window.open(res.fileUrl, "_blank");
-  } catch (e) {
-    console.error(e);
-    alert("Erreur export PDF annuel");
+    const res = await window.postToGAS({
+      action: "exportAnnuelPDF",
+      year: String(year)
+    });
+    const result = res?.result;
+    const serverError = res?.error || result?.error;
+    if (!res?.ok || result?.ok === false || serverError) {
+      const detail = typeof serverError === "string"
+        ? serverError
+        : serverError?.message || result?.message || res?.message;
+      if (/unauthorized|non authentifi|token.*expir/i.test(detail || "")) {
+        throw new Error("Votre session a expiré. Reconnectez-vous pour exporter le PDF annuel.");
+      }
+      if (/forbidden|access.denied|admin.only/i.test(detail || "")) {
+        throw new Error("L’export PDF annuel est réservé à l’administrateur.");
+      }
+      if (detail) throw new Error(`Le serveur n’a pas pu générer le PDF annuel : ${detail}`);
+      if (typeof res?.raw === "string") {
+        throw new Error("Le serveur Google Apps Script a renvoyé une réponse invalide. Vérifiez le déploiement du script.");
+      }
+      throw new Error("Le serveur n’a pas pu générer le PDF annuel. Vérifiez la fonction exportAnnuelPDF dans Google Apps Script.");
+    }
+
+    // Certains traitements Apps Script enveloppent le résultat dans « result ».
+    const fileUrl = res.fileUrl || result?.fileUrl;
+    if (typeof fileUrl !== "string" || !fileUrl.trim()) {
+      throw new Error("Le serveur n’a renvoyé aucun lien PDF. Vérifiez la fonction exportAnnuelPDF et son déploiement dans Google Apps Script.");
+    }
+    let url;
+    try {
+      url = new URL(fileUrl);
+      if (!["https:", "http:"].includes(url.protocol)) throw new Error("Protocole invalide");
+    } catch {
+      throw new Error("Le serveur a renvoyé un lien PDF invalide.");
+    }
+
+    if (download) {
+      download.href = url.href;
+      download.textContent = `Télécharger le PDF annuel ${year}`;
+      download.hidden = false;
+    }
+    if (status) status.textContent = `Le PDF annuel ${year} est prêt. Utilisez le lien ci-dessous pour l’ouvrir si nécessaire.`;
+
+    if (pdfWindow && !pdfWindow.closed) {
+      try {
+        pdfWindow.location.replace(url.href);
+      } catch {
+        pdfWindow.close();
+      }
+    }
+  } catch (error) {
+    if (pdfWindow && !pdfWindow.closed) pdfWindow.close();
+    console.error("Erreur export PDF annuel", error);
+    const message = error instanceof TypeError
+      ? "Impossible de joindre le serveur. Vérifiez votre connexion et le déploiement Google Apps Script, puis réessayez."
+      : error?.message || "Impossible de générer le PDF annuel. Réessayez.";
+    showError(message);
+  } finally {
+    annualPdfExportInProgress = false;
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
   }
 };
 
