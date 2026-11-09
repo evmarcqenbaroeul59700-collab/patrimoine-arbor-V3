@@ -104,6 +104,7 @@ var it = null;
   let legendControl = null; // ✅ éviter double légende
   let lastDeletedTree = null;
   let pendingPhotos = [];
+  let photoDeletionInProgress = false;
 let authToken = localStorage.getItem("authToken");
 let gpsMarker = null;
 
@@ -668,6 +669,68 @@ if (m && m[1]) return `https://drive.google.com/thumbnail?id=${m[1]}&sz=w1200`;
 
 
   
+  function updatePhotoStatus() {
+    const status = el("photoStatus");
+    if (!status) return;
+
+    status.textContent = pendingPhotos.length
+      ? `📷 ${pendingPhotos.length} photo${pendingPhotos.length > 1 ? "s" : ""} ajoutée${pendingPhotos.length > 1 ? "s" : ""}`
+      : "";
+  }
+
+  function refreshPhotoViews() {
+    const tree = selectedId ? getTreeById(selectedId) : null;
+    const photos = [...(tree?.photos || []), ...pendingPhotos];
+    updatePhotoStatus();
+    renderGallery(photos);
+    renderPhotoCarousel(photos);
+  }
+
+  async function deletePhoto(photo) {
+    if (!photo || photoDeletionInProgress) return;
+
+    // Une photo récente peut être retirée avant l'enregistrement de la fiche.
+    if (pendingPhotos.includes(photo)) {
+      pendingPhotos = pendingPhotos.filter(p => p !== photo);
+      refreshPhotoViews();
+      return;
+    }
+
+    const tree = selectedId ? getTreeById(selectedId) : null;
+    if (!tree || !(tree.photos || []).includes(photo)) return;
+    if (!confirm("Supprimer cette photo ?")) return;
+
+    const driveId = photo.driveId || extractDriveIdFromUrl(photo.url);
+    photoDeletionInProgress = true;
+    refreshPhotoViews();
+
+    try {
+      if (driveId) {
+        const res = await postToGAS({
+          action: "deletePhoto",
+          treeId: tree.id,
+          photoDriveId: driveId
+        });
+
+        if (!res?.ok || res.result?.status !== "PHOTO_DELETED") {
+          throw new Error("Suppression de la photo refusée");
+        }
+      }
+
+      // Mettre aussi à jour les photos locales, sans effacer les ajouts en cours.
+      tree.photos = tree.photos.filter(p => p !== photo);
+      saveTreesLocal();
+      renderMarkers();
+      renderList();
+    } catch (error) {
+      console.error("Erreur lors de la suppression de la photo", error);
+      alert("❌ Impossible de supprimer la photo. Réessayez.");
+    } finally {
+      photoDeletionInProgress = false;
+      refreshPhotoViews();
+    }
+  }
+
   function renderGallery(photos) {
     const g = galleryEl();
     if (!g) return;
@@ -700,53 +763,13 @@ if (!p.driveId && p.url) {
   }
 }
 
-    const del = document.createElement("button");
-del.className = "danger";
-del.textContent = "Retirer";
-
-del.onclick = async () => {
-  const photo = photos[idx];
-
-  // 🕓 PHOTO TEMPORAIRE (pas encore enregistrée)
-  if (!photo.driveId) {
-    pendingPhotos = pendingPhotos.filter(p => p.id !== photo.id);
-
-    updatePhotoStatus();
-
-    const t = selectedId ? getTreeById(selectedId) : null;
-    const allPhotos = [
-      ...(t?.photos || []),
-      ...pendingPhotos
-    ];
-
-    renderGallery(allPhotos);
-    renderPhotoCarousel(allPhotos);
-    return;
-  }
-
-  // 📦 PHOTO DÉJÀ ENREGISTRÉE (Drive)
-  if (!selectedId) return;
-  if (!confirm("Supprimer cette photo ?")) return;
-
-  const t = getTreeById(selectedId);
-  if (!t) return;
-
-  const res = await postToGAS({
-  action: "deletePhoto",
-  treeId: t.id,
-  photoDriveId: photo.driveId
-});
-
-if (res?.ok && res.result?.status === "PHOTO_DELETED") {
-  alert("📸 Photo retirée avec succès");
-} else {
-  alert("❌ Erreur lors de la suppression de la photo");
-}
-
-await loadTreesFromSheets();
-persistAndRefresh(t.id);
-
-};
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "danger";
+      del.textContent = "Supprimer";
+      del.setAttribute("aria-label", `Supprimer la photo ${p.name || idx + 1}`);
+      del.disabled = photoDeletionInProgress;
+      del.onclick = () => deletePhoto(p);
 
 
 
@@ -1038,6 +1061,7 @@ const stampedDataUrl = await stampPhotoWithMeta(
   document.getElementById("photoCarousel")?.classList.add("hidden");
 
   pendingPhotos = [];
+  updatePhotoStatus();
   selectedId = id;
   window.selectedId = id;
 
@@ -1457,7 +1481,7 @@ cameraInput.addEventListener("change", async () => {
 
   for (const photo of newPhotos) {
     if (!pendingPhotos.some(
-      p => p.name === photo.name && p.size === photo.size
+      p => p.name === photo.name && p.dataUrl === photo.dataUrl
     )) {
       pendingPhotos.push(photo);
     }
@@ -1465,9 +1489,7 @@ cameraInput.addEventListener("change", async () => {
 
   cameraInput.value = ""; // 🔒 empêche double déclenchement
 
-  updatePhotoStatus();
-  renderGallery(pendingPhotos);
-  renderPhotoCarousel(pendingPhotos);
+  refreshPhotoViews();
 });
 
 
@@ -1479,7 +1501,7 @@ galleryInput.addEventListener("change", async () => {
 
   for (const photo of newPhotos) {
     if (!pendingPhotos.some(
-      p => p.name === photo.name && p.size === photo.size
+      p => p.name === photo.name && p.dataUrl === photo.dataUrl
     )) {
       pendingPhotos.push(photo);
     }
@@ -1487,21 +1509,9 @@ galleryInput.addEventListener("change", async () => {
 
   galleryInput.value = ""; // 🔒 reset obligatoire
 
-  updatePhotoStatus();
-  renderGallery(pendingPhotos);
-  renderPhotoCarousel(pendingPhotos);
+  refreshPhotoViews();
 });
 
-
-
-function updatePhotoStatus() {
-  if (pendingPhotos.length === 0) {
-    photoStatus.textContent = "";
-    return;
-  }
-
-  photoStatus.textContent = `📷 ${pendingPhotos.length} photo${pendingPhotos.length > 1 ? "s" : ""} ajoutée${pendingPhotos.length > 1 ? "s" : ""}`;
-}
 
 
 // 📸 Caméra
@@ -1896,8 +1906,15 @@ function renderPhotoCarousel(photos) {
   const box = document.getElementById("photoCarousel");
   const img = document.getElementById("carouselImage");
   const count = document.getElementById("carouselCount");
+  const deleteBtn = document.getElementById("carouselDeleteBtn");
+
+  carouselPhotos = photos || [];
 
   if (!photos || photos.length === 0) {
+    carouselIndex = 0;
+    img.removeAttribute("src");
+    count.textContent = "";
+    if (deleteBtn) deleteBtn.disabled = true;
     box.classList.add("hidden");
     return;
   }
@@ -1908,6 +1925,11 @@ function renderPhotoCarousel(photos) {
 
   box.classList.remove("hidden");
   updateCarousel();
+
+  if (deleteBtn) {
+    deleteBtn.disabled = photoDeletionInProgress;
+    deleteBtn.onclick = () => deletePhoto(carouselPhotos[carouselIndex]);
+  }
 
   // boutons (UNE SEULE FOIS)
   box.querySelector(".left").onclick = () => {
