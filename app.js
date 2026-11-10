@@ -1,67 +1,57 @@
-
 /* ===== VALIDATION ENTREPRISE ===== */
 function wireValidationEntreprise() {
   const btn = document.getElementById("btnValidationEntreprise");
   if (!btn) return;
-
-  // visible seulement admin + Perilhon
   const role = (localStorage.getItem("userRole") || "").toLowerCase();
   const secteur = (localStorage.getItem("userSecteur") || "").toLowerCase();
+  const allowed = role === "admin" || (role === "entreprise" && secteur === "perilhon");
+  btn.style.display = allowed ? "" : "none";
+  if (!allowed) return;
 
-  const canValidate =
-    role === "admin" ||
-    (role === "entreprise" && secteur === "perilhon");
-
-  if (!canValidate) {
-    btn.style.display = "none";
-    return;
-  }
-
-  btn.onclick = () => {
-    if (!window.selectedId) {
-      alert("Sélectionne un arbre");
+  btn.onclick = async () => {
+    const treeId = window.selectedId;
+    if (!treeId || !window.getTreeById(treeId)) {
+      alert("Enregistrez et sélectionnez un arbre avant de valider les travaux.");
       return;
     }
-
-    const t = window.getTreeById(window.selectedId);
-    if (!t) return;
-
-    t.validationEntreprise = true;
-    window.persistAndRefresh(t.id);
-
-    alert("✅ Travaux validés par l'entreprise");
+    if (btn.disabled) return;
+    const text = btn.textContent;
+    const save = document.getElementById("saveBtn");
+    const saveWasDisabled = save?.disabled;
+    btn.disabled = true;
+    btn.textContent = "Enregistrement…";
+    if (save) save.disabled = true;
+    try {
+      const res = await window.postToGAS({
+        action: "validateEntreprise", treeId: treeId, validationEntreprise: true
+      });
+      if (!res?.ok || res.result?.status !== "VALIDATION_ENTREPRISE_UPDATED" || res.result.validationEntreprise !== true) {
+        throw new Error(typeof res?.error === "string" ? res.error : "Le serveur n’a pas confirmé la validation. Vérifiez le déploiement Google Apps Script.");
+      }
+      window.applyValidationEntrepriseState(treeId, true, res.result.updatedAt);
+      alert("✅ Validation entreprise enregistrée.");
+    } catch (error) {
+      console.error("Validation entreprise non enregistrée", error);
+      alert("❌ Impossible de confirmer l’enregistrement de la validation. " + (error?.message || "Vérifiez votre connexion et réessayez."));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = text;
+      if (save) save.disabled = saveWasDisabled;
+    }
   };
 }
+
 /* ===== VALIDER INTERVENTION ===== */
 function wireValidateIntervention() {
   const btn = document.getElementById("btnValiderIntervention");
   if (!btn) return;
-
-
-  // 🔒 verrouillage visuel pour secteur
-  if (!isAdmin()) {
-    btn.disabled = true;
-    btn.style.opacity = "0.4";
-    btn.style.cursor = "not-allowed";
-    btn.title = "Action réservée à l’administrateur";
-    return; // ⛔ STOP ici
-  }
-
-  // 👑 ADMIN SEUL
-  btn.onclick = () => {
-    const txt = historyInterventionsEl().value.trim();
-    if (!txt) {
-      alert("Aucune intervention à valider.");
-      return;
-    }
-
-    const now = new Date().toLocaleString("fr-FR");
-    historyInterventionsEl().value = `🛠 ${now} — ${txt}`;
-
-    alert("Intervention validée. Pense à enregistrer.");
-  };
+  const allowed = window.isAdmin();
+  btn.disabled = !allowed;
+  btn.style.opacity = allowed ? "" : "0.4";
+  btn.style.cursor = allowed ? "" : "not-allowed";
+  btn.title = allowed ? "" : "Action réservée à l’administrateur";
+  btn.onclick = allowed ? handleValiderIntervention_ : null;
 }
-
 
 /* FIX: prevent ReferenceError for stray `it` */
 var it = null;
@@ -101,6 +91,7 @@ var it = null;
 
   let trees = [];
   let selectedId = null;
+  window.selectedId = null;
   let legendControl = null; // ✅ éviter double légende
   let lastDeletedTree = null;
   let pendingPhotos = [];
@@ -149,10 +140,6 @@ let isAuthenticated = !!authToken;
 function isAdmin() {
   return (localStorage.getItem("userRole") || "").toLowerCase() === "admin";
 }
-
-function isEntreprisePerilhon(){
-  return localStorage.getItem("userSecteur") === "Perilhon";
-}
 window.isAdmin = isAdmin; // ✅ AJOUT CRITIQUE
 
 
@@ -165,20 +152,20 @@ function isPastilleTree(t){
 // =========================
 function getVisibleTrees() {
   const role = (localStorage.getItem("userRole") || "").toLowerCase();
-  const secteurUser = (localStorage.getItem("userSecteur") || "").toLowerCase();
+  const secteurUser = localStorage.getItem("userSecteur") || "";
 
   // 👑 Admin → tout voir
   if (role === "admin") {
     return trees;
   }
 
-  // 🏢 Entreprise Perilhon → tout voir
-  if (role === "entreprise" && secteurUser === "perilhon") {
+  // 🏢 Entreprise (Perilhon) → TOUT voir
+  if (role === "entreprise" && secteurUser === "Perilhon") {
     return trees;
   }
 
   // 👤 Comptes secteur → uniquement leur secteur
-  return trees.filter(t => (t.secteur || "").toLowerCase() === secteurUser);
+  return trees.filter(t => t.secteur === secteurUser);
 }
 
 
@@ -330,8 +317,9 @@ window.postToGAS = postToGAS;
   function getTreeById(id) {
     return trees.find((t) => t.id === id);
   }
+  
+window.getTreeById = getTreeById; // ✅ EXPOSITION GLOBALE
 
-  window.getTreeById = getTreeById;
 
   function loadTrees() {
     try {
@@ -352,8 +340,20 @@ window.postToGAS = postToGAS;
     renderSecteurCount();
     if (focusId) setSelected(focusId);
   }
+window.persistAndRefresh = persistAndRefresh;
 
-  window.persistAndRefresh = persistAndRefresh;
+// Rafraîchir uniquement l'état et le marqueur : la fiche et les photos
+// non enregistrées restent disponibles pendant la validation entreprise.
+window.applyValidationEntrepriseState = function (treeId, value, updatedAt) {
+  const tree = getTreeById(treeId);
+  if (!tree) return;
+  tree.validationEntreprise = value === true;
+  delete tree.validationEntrepriseResetRequested;
+  if (updatedAt) tree.updatedAt = updatedAt;
+  saveTreesLocal();
+  addOrUpdateMarker(tree);
+};
+
 
 async function syncToSheets(treeObj) {
   try {
@@ -384,44 +384,31 @@ function createTreeIcon(color = "#4CAF50", etat = "", validationEntreprise = fal
   const g = "g_" + Math.random().toString(36).slice(2);
 
   let badge = "";
-let cross = "";
+  let cross = "";
 
-if (validationEntreprise === true) {
-  cross = `
-    <line x1="18" y1="18" x2="46" y2="46"
-          stroke="white" stroke-width="4"/>
-    <line x1="46" y1="18" x2="18" y2="46"
-          stroke="white" stroke-width="4"/>
-  `;
-}
+  // 🔴 abattage
+  if (etat === "Dangereux (A abattre)") {
+    badge = `
+      <circle class="pulse-ring danger"
+        cx="46" cy="11" r="8"
+        fill="#e53935" opacity="0.75"/>
+      <circle cx="46" cy="10" r="8"
+        fill="#e53935" stroke="#000" stroke-width="2"/>`;
+  }
 
- if (etat === "Dangereux (A abattre)") {
- badge = `
-  <circle class="pulse-ring danger"
-          cx="46" cy="11" r="8"
-          fill="#e53935"
-          opacity="0.75"
-          style="transform-origin:46px 10px; transform-box:fill-box;" />
-  <circle cx="46" cy="10" r="8" fill="#e53935" stroke="#000000ff" stroke-width="2"/>`;
-
-}
-
-
-
+  // 🟠 autres états (tu peux garder les tiens)
   if (etat === "A surveiller") {
-    badge = `<circle cx="46" cy="10" r="8" fill="#fb8c00" stroke="#000000ff" stroke-width="2"/>`;
+    badge = `<circle cx="46" cy="10" r="8" fill="#fb8c00" stroke="#000" stroke-width="2"/>`;
   }
 
-    if (etat === "A élaguer (URGENT)") {
-    badge = `<circle cx="46" cy="10" r="8" fill="#FFFF00" stroke="#000000ff" stroke-width="2"/>`;
-  }
-
-  if (etat === "A élaguer (Moyen)") {
-    badge = `<circle cx="46" cy="10" r="8" fill="#00FFFF" stroke="#000000ff" stroke-width="2"/>`;
-  }
-
-  if (etat === "A élaguer (Faible)") {
-    badge = `<circle cx="46" cy="10" r="8" fill="#43a047" stroke="#000000ff" stroke-width="2"/>`;
+  // ❌ CROIX BLANCHE ENTREPRISE
+  if (validationEntreprise === true) {
+    cross = `
+      <line x1="18" y1="18" x2="46" y2="46"
+            stroke="white" stroke-width="4"/>
+      <line x1="46" y1="18" x2="18" y2="46"
+            stroke="white" stroke-width="4"/>
+    `;
   }
 
   return L.divIcon({
@@ -440,12 +427,13 @@ if (validationEntreprise === true) {
         <circle cx="20" cy="30" r="14" fill="url(#${g})"/>
         <circle cx="44" cy="30" r="14" fill="url(#${g})"/>
 
+        <!-- ✅ CROIX ENTREPRISE -->
         ${cross}
 
         <!-- tronc -->
         <rect x="28" y="38" width="8" height="18" rx="2" fill="#6D4C41"/>
 
-        <!-- ✅ badge ÉTAT AU-DESSUS -->
+        <!-- badge état -->
         ${badge}
       </svg>
     `,
@@ -454,6 +442,7 @@ if (validationEntreprise === true) {
     popupAnchor: [0, -36],
   });
 }
+
 
 function getTreeIconScale(zoom) {
   if (zoom >= 17) return 1;     // zoom proche
@@ -975,10 +964,11 @@ const stampedDataUrl = await stampPhotoWithMeta(
         map.setView([t.lat, t.lng], Math.max(map.getZoom(), 16));
         const m = markers.get(t.id);
         if (m) m.openPopup();
-      if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
-  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+        if (!canConsultPastilleTree() && isPastilleTree(t)) {
+  alert("⛔ Arbre verrouillé (pastille)");
   return;
 }
+
         setSelected(t.id);
         highlightListSelection();
       };
@@ -987,10 +977,11 @@ const stampedDataUrl = await stampPhotoWithMeta(
 
       item.onclick = (e) => {
         if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === "button") return;
-       if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
-  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
+        if (!canConsultPastilleTree() && isPastilleTree(t)) {
+  alert("⛔ Arbre verrouillé (pastille)");
   return;
 }
+
         setSelected(t.id);
         highlightListSelection();
       };
@@ -1063,7 +1054,8 @@ const stampedDataUrl = await stampPhotoWithMeta(
   pendingPhotos = [];
   updatePhotoStatus();
   selectedId = id;
-  window.selectedId = id;
+window.selectedId = id;
+
 
   const t = id ? getTreeById(id) : null;
 
@@ -1125,23 +1117,25 @@ renderTreePreview(t);
 function addOrUpdateMarker(t) {
   let m = markers.get(t.id);
 
- const icon = createTreeIcon(
+  const icon = createTreeIcon(
   getColorFromSecteur(t.secteur),
   t.etat,
   t.validationEntreprise === true
 );
 
+
   if (!m) {
     m = L.marker([t.lat, t.lng], { icon }).addTo(map);
 
-    m.on("click", () => {
-      if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
-  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
-  return;
-}
-        setSelected(t.id);
-      highlightListSelection();
-    });
+   m.on("click", () => {
+  if (!canConsultPastilleTree() && isPastilleTree(t)) {
+    alert("⛔ Arbre verrouillé (pastille)");
+    return;
+  }
+  setSelected(t.id);
+  highlightListSelection();
+});
+
 
     markers.set(t.id, m);
   } else {
@@ -1646,10 +1640,7 @@ if (undoBtn) {
     renderMarkers();
     renderList();
     renderSecteurCount();
-    if(!isAdmin() && localStorage.getItem("userSecteur") !== "Perilhon" && isPastilleTree(t)) {
-  alert('⛔ Arbre verrouillé : sélection réservée admin ou entreprise');
-  return;
-}
+    if(!isAdmin() && isPastilleTree(t)) { alert('⛔ Arbre verrouillé (pastille) : sélection réservée admin'); return; }
         setSelected(t.id);
 
     // 🔗 restauration Google Sheets
@@ -1861,9 +1852,60 @@ async function startApp() {
   initMap();
   addLegendToMap();
   wireUI();
-wireValidationEntreprise();
-wireValidateIntervention();
-applyTravauxLock();
+  wireValidationEntreprise();
+  wireValidateIntervention();
+  applyTravauxLock();
+  disablePdfButtonsForPerilhon(); // 👈 ICI
+
+
+
+// 🔒 Verrouillage métier pour entreprise Perilhon (consultation OK)
+if (isEntreprisePerilhon() && !isAdmin()) {
+
+  // ⛔ champs de saisie uniquement
+document.querySelectorAll(
+  "input, textarea, select"
+).forEach(el => {
+
+  // ⛔ NE PAS TOUCHER AU LOGIN
+  if (el.closest("#loginOverlay")) {
+    return;
+  }
+
+  // ✅ AUTORISER LES INPUTS PHOTO
+  if (el.id === "cameraInput" || el.id === "galleryInput") {
+    el.disabled = false;
+    el.style.opacity = "";
+    return;
+  }
+
+  el.disabled = true;
+  el.style.opacity = "0.5";
+});
+
+
+
+
+  // ⛔ boutons MÉTIER uniquement
+  const forbiddenButtons = [
+    "#saveBtn",
+    "#deleteBtn",
+    "#importBtn",
+    "#exportBtn",
+    "#btnValiderIntervention"
+  ];
+
+  forbiddenButtons.forEach(sel => {
+    const b = document.querySelector(sel);
+    if (b) {
+      b.disabled = true;
+      b.style.opacity = "0.5";
+    }
+  });
+}
+
+
+
 
   await loadQuartiersGeoJSON();
   await loadCityContourAndLock();
@@ -2090,36 +2132,38 @@ function updateRightPreviewHistory_(text) {
 }
 
 function getSelectedTreeObject_() {
-  if (typeof selectedTree !== "undefined" && selectedTree) return selectedTree;
-  if (typeof currentTree !== "undefined" && currentTree) return currentTree;
-  if (typeof selectedArbre !== "undefined" && selectedArbre) return selectedArbre;
-  return null;
+  return window.selectedId ? window.getTreeById(window.selectedId) : null;
 }
 
 function setSelectedTreeHistory_(txt) {
   const t = getSelectedTreeObject_();
-  if (t) t.historyInterventions = txt;
+  if (t) t.historiqueInterventions = txt;
 }
 
 function handleValiderIntervention_() {
+  if (!window.isAdmin()) return;
   const line = formatInterventionLine_();
-  if (!line) return;
+  if (!line) {
+    alert("Renseignez les travaux à valider.");
+    return;
+  }
   appendToHistoryUI_(line);
-
   const txt = (document.getElementById("historyInterventions")?.value || "").trim();
   setSelectedTreeHistory_(txt);
   updateRightPreviewHistory_(txt);
-
+  const tree = getSelectedTreeObject_();
+  if (tree) {
+    tree.validationEntreprise = false;
+    tree.validationEntrepriseResetRequested = true;
+    const etat = document.getElementById("etat");
+    if (etat && etat.value !== "Dangereux (A abattre)") {
+      tree.etat = "";
+      etat.value = "";
+    }
+  }
   clearTravauxFields_();
-
-  const sb = document.getElementById("saveBtn");
-  if (sb) sb.click();
+  document.getElementById("saveBtn")?.click();
 }
-
-document.addEventListener("DOMContentLoaded", () => {
-  const btn = document.getElementById("btnValiderIntervention");
-  if (btn) btn.addEventListener("click", handleValiderIntervention_);
-});
 
 // =========================
 // 📄 EXPORT PDF (ADMIN UNIQUEMENT) — TÉLÉCHARGEMENT LOCAL
@@ -2348,5 +2392,41 @@ async function normalizePhotoToJpeg(file) {
     };
 
     img.src = url;
+  });
+}
+function isEntreprisePerilhon() {
+  return (
+    
+    (localStorage.getItem("userRole") || "").toLowerCase() === "entreprise" &&
+    (localStorage.getItem("userSecteur") || "") === "Perilhon"
+  );
+}
+
+
+function canValidateEntreprise() {
+  return isAdmin() || isEntreprisePerilhon();
+}
+
+function canConsultPastilleTree() {
+  return isAdmin() || isEntreprisePerilhon();
+}
+function disablePdfButtonsForPerilhon() {
+  if (!isEntreprisePerilhon()) return;
+
+  const pdfButtons = [
+    'button[onclick^="exportArbrePDF"]',
+    'button[onclick^="exportAnnuelPDF"]',
+    'button[onclick^="exportSurveillancePDF"]',
+    'button[onclick^="exportAbattagesPDF"]',
+    'button[onclick^="exportElagagesPDF"]'
+  ];
+
+  pdfButtons.forEach(sel => {
+    document.querySelectorAll(sel).forEach(btn => {
+      btn.disabled = true;
+      btn.style.opacity = "0.45";
+      btn.style.cursor = "not-allowed";
+      btn.title = "Action réservée à l’administrateur";
+    });
   });
 }
