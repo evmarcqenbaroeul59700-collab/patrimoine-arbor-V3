@@ -401,6 +401,10 @@ function createTreeIcon(color = "#4CAF50", etat = "", validationEntreprise = fal
     badge = `<circle cx="46" cy="10" r="8" fill="#fb8c00" stroke="#000" stroke-width="2"/>`;
   }
 
+  if (etat === "A remplacer") {
+    badge = `<circle class="etat-remplacer" cx="46" cy="10" r="8" fill="#000000" stroke="#ffffff" stroke-width="2"/>`;
+  }
+
   // ❌ CROIX BLANCHE ENTREPRISE
   if (validationEntreprise === true) {
     cross = `
@@ -510,13 +514,14 @@ function addLegendToMap() {
 
     div.innerHTML = `
       <div class="legend-header">
-        <b>Légende — Secteurs</b>
+        <b>Légende</b>
         <button id="legendToggleBtn">➖</button>
       </div>
       <div id="legendContent"></div>
     `;
 
     const content = div.querySelector("#legendContent");
+    content.innerHTML = "<b>Secteurs</b>";
 
     SECTEURS.forEach((secteur) => {
       const color = getColorFromSecteur(secteur);
@@ -527,6 +532,15 @@ function addLegendToMap() {
         </div>
       `;
     });
+
+    content.innerHTML += `
+      <div class="divider"></div>
+      <b>État de l’arbre</b>
+      <div class="legend-item">
+        <span class="legend-icon" style="background:#000000; border-color:#ffffff;"></span>
+        À remplacer
+      </div>
+    `;
 
     return div;
   };
@@ -2022,6 +2036,7 @@ function extractDriveIdFromUrl(url) {
 function getColorFromEtat(etat) {
   switch (etat) {
     case "Dangereux (A abattre)": return "#e53935"; // rouge
+    case "A remplacer": return "#000000"; // noir
     case "A surveiller":  return "#fb8c00"; // orange
     case "A élaguer (URGENT)":  return "#FFFF00"; // jaune
     case "A élaguer (Moyen)":  return "#00FFFF"; // beuc lair
@@ -2156,9 +2171,14 @@ function handleValiderIntervention_() {
     tree.validationEntreprise = false;
     tree.validationEntrepriseResetRequested = true;
     const etat = document.getElementById("etat");
-    if (etat && etat.value !== "Dangereux (A abattre)") {
-      tree.etat = "";
-      etat.value = "";
+    if (etat) {
+      if (etat.value === "Dangereux (A abattre)") {
+        tree.etat = "A remplacer";
+        etat.value = "A remplacer";
+      } else if (etat.value !== "A remplacer") {
+        tree.etat = "";
+        etat.value = "";
+      }
     }
   }
   clearTravauxFields_();
