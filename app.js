@@ -10,11 +10,13 @@ function wireValidationEntreprise() {
 
   btn.onclick = async () => {
     const treeId = window.selectedId;
-    if (!treeId || !window.getTreeById(treeId)) {
+    const tree = treeId ? window.getTreeById(treeId) : null;
+    if (!tree) {
       alert("Enregistrez et sélectionnez un arbre avant de valider les travaux.");
       return;
     }
     if (btn.disabled) return;
+    const nextValidation = tree.validationEntreprise !== true;
     const text = btn.textContent;
     const save = document.getElementById("saveBtn");
     const saveWasDisabled = save?.disabled;
@@ -23,13 +25,13 @@ function wireValidationEntreprise() {
     if (save) save.disabled = true;
     try {
       const res = await window.postToGAS({
-        action: "validateEntreprise", treeId: treeId, validationEntreprise: true
+        action: "validateEntreprise", treeId: treeId, validationEntreprise: nextValidation
       });
-      if (!res?.ok || res.result?.status !== "VALIDATION_ENTREPRISE_UPDATED" || res.result.validationEntreprise !== true) {
+      if (!res?.ok || res.result?.status !== "VALIDATION_ENTREPRISE_UPDATED" || res.result.validationEntreprise !== nextValidation) {
         throw new Error(typeof res?.error === "string" ? res.error : "Le serveur n’a pas confirmé la validation. Vérifiez le déploiement Google Apps Script.");
       }
-      window.applyValidationEntrepriseState(treeId, true, res.result.updatedAt);
-      alert("✅ Validation entreprise enregistrée.");
+      window.applyValidationEntrepriseState(treeId, nextValidation, res.result.updatedAt);
+      alert(nextValidation ? "✅ Validation entreprise enregistrée." : "✅ Validation entreprise annulée.");
     } catch (error) {
       console.error("Validation entreprise non enregistrée", error);
       alert("❌ Impossible de confirmer l’enregistrement de la validation. " + (error?.message || "Vérifiez votre connexion et réessayez."));
