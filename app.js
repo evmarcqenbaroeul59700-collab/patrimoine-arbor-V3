@@ -410,6 +410,11 @@ function createTreeIcon(color = "#4CAF50", etat = "", validationEntreprise = fal
     badge = `<circle class="etat-remplacer" cx="46" cy="10" r="8" fill="#000000" stroke="#ffffff" stroke-width="2"/>`;
   }
 
+  // Pastilles d’élagage : jaune, bleu clair et vert selon la priorité.
+  if (["A élaguer (URGENT)", "A élaguer (Moyen)", "A élaguer (Faible)"].includes(etat)) {
+    badge = `<circle class="etat-elagage" cx="46" cy="10" r="8" fill="${getColorFromEtat(etat)}" stroke="#000" stroke-width="2"/>`;
+  }
+
   // ❌ CROIX BLANCHE ENTREPRISE
   if (validationEntreprise === true) {
     cross = `
