@@ -386,6 +386,20 @@ body.agent-mode button {
   </div>
 </div>
 
+    <div class="card" id="rappelsElagageCard">
+      <div class="topRow"><h2>Élagages à programmer</h2><span id="rappelsElagageCount" class="pill">0</span></div>
+      <p class="hint">Rappel cinq ans après le dernier élagage réalisé.</p>
+      <div id="rappelsElagageList" class="list"></div>
+      <div id="rappelElagageEmailConfig" hidden>
+        <div class="divider"></div>
+        <label><input type="checkbox" id="rappelElagageEmailActif"> Recevoir les rappels par e-mail</label>
+        <label for="rappelElagageEmail">Adresse de réception des rappels</label>
+        <input type="email" id="rappelElagageEmail" autocomplete="email" placeholder="Adresse de réception">
+        <button type="button" id="saveRappelElagageEmail" class="secondary">Enregistrer les e-mails</button>
+        <p id="rappelElagageEmailStatus" class="hint" role="status" aria-live="polite"></p>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Arbres par secteur</h2>
       <div id="secteurCount" class="list"></div>
@@ -535,6 +549,14 @@ body.agent-mode button {
   ✔️ Valider travaux
 </button>
 
+      <div class="divider"></div>
+      <h2>Rappel d’élagage</h2>
+      <label><input type="checkbox" id="rappelElagageActif"> Rappel automatique tous les cinq ans</label>
+      <label for="dernierElagageDate">Date du dernier élagage réalisé</label>
+      <input type="date" id="dernierElagageDate">
+      <p id="rappelElagageStatus" class="hint" role="status" aria-live="polite"></p>
+      <p class="hint">Après un nouvel élagage validé avec sa date d’exécution, l’échéance est recalculée. Pour les anciennes fiches sans date d’exécution, renseignez cette date ici.</p>
+
       <label>Photos (jpg/png)</label>
   <div class="photo-actions">
   <button type="button" id="takePhotoBtn" class="secondary">
@@ -594,7 +616,7 @@ body.agent-mode button {
 
 <!-- ✅ TON JS -->
 
-<script src="app.js?v=17" defer></script>
+<script src="app.js?v=18" defer></script>
 
 
 <div id="loginOverlay">

@@ -187,6 +187,8 @@ function applyTravauxLock() {
     "numeroFacture",
     "comment",
     "historyInterventions",
+    "dernierElagageDate",
+    "rappelElagageActif",
   ];
 
   const locked = !isAdmin();
@@ -366,13 +368,14 @@ async function syncToSheets(treeObj) {
       p => p.dataUrl && p.dataUrl.startsWith("data:")
     );
 
-  await postToGAS({ payload });
+  const result = await postToGAS({ payload });
+  if (!result?.ok) throw new Error(result?.error || "Enregistrement non confirmé par le serveur");
 await loadTreesFromSheets();
-
-
-
+  return true;
   } catch (e) {
     console.error("❌ Sync Google Sheets échouée", e);
+    alert("Enregistrement non confirmé : " + (e?.message || "vérifiez votre connexion et réessayez"));
+    return false;
   }
 }
 
@@ -927,6 +930,7 @@ const stampedDataUrl = await stampPhotoWithMeta(
 
     count.textContent = `${filtered.length} / ${trees.length}`;
     list.innerHTML = "";
+    renderRappelsElagage();
 
     if (filtered.length === 0) {
       const empty = document.createElement("div");
@@ -1074,6 +1078,7 @@ window.selectedId = id;
 
 
   const t = id ? getTreeById(id) : null;
+  setRappelElagageForm(t);
 
 
     if (!t) {
@@ -1123,6 +1128,7 @@ if (t.photos && t.photos.length > 0) {
 }
 
 renderTreePreview(t);
+renderRappelElagagePreview();
 
   }
 
@@ -1679,6 +1685,8 @@ if (undoBtn) {
       }
 
       const quartier = getQuartierFromLatLng(lat, lng);
+      const rappelPayload = rappelElagagePayload();
+      if (rappelPayload === null) return;
 const photos = pendingPhotos.map(p => ({
   id: p.id,
   name: p.name,
@@ -1715,6 +1723,7 @@ if (selectedId) {
 
   t.comment = commentEl().value.trim();
   t.historiqueInterventions = historyInterventionsEl().value.trim();
+  Object.assign(t, rappelPayload);
 
   // 🔥 photos : fusion définitive
   t.photos = [...(t.photos || []), ...pendingPhotos];
@@ -1723,7 +1732,7 @@ if (selectedId) {
   t.updatedAt = Date.now();
 
   saveTreesLocal();        // 💾 local OK
-  await syncToSheets(t);  // ☁️ Sheets (métadonnées seulement)
+  if (!await syncToSheets(t)) return false;
 
   persistAndRefresh(t.id); // 🔁 UI + carte + liste
 
@@ -1754,14 +1763,15 @@ if (selectedId) {
         etat: etatEl().value || "",
         comment: commentEl().value.trim(),
         historiqueInterventions: historyInterventionsEl().value.trim(),
+        ...rappelPayload,
         photos,
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
 
-      await syncToSheets(t);
+      if (!await syncToSheets(t)) return false;
 
-      trees.unshift(t);
+      if (!getTreeById(t.id)) trees.unshift(t);
       persistAndRefresh(t.id);
 pendingPhotos = [];
 
@@ -1868,6 +1878,7 @@ async function startApp() {
   initMap();
   addLegendToMap();
   wireUI();
+  wireRappelsElagage();
   wireValidationEntreprise();
   wireValidateIntervention();
   applyTravauxLock();
@@ -2094,6 +2105,158 @@ document.getElementById("loginBtn")?.addEventListener("click", async () => {
 document.getElementById("logoutBtn")?.addEventListener("click", logout);
 
 
+  let rappelElagageDirty = false;
+
+  function rappelToday() {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Paris", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+    const values = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+
+  function rappelDateValide(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
+    const date = new Date(value + "T12:00:00Z");
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  }
+
+  function rappelNextDate(value) {
+    if (!rappelDateValide(value)) return "";
+    const [y, m, d] = value.split("-").map(Number);
+    const nextYear = y + 5;
+    const day = Math.min(d, new Date(Date.UTC(nextYear, m, 0)).getUTCDate());
+    return `${nextYear}-${String(m).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+
+  function rappelDateLisible(value) {
+    return value ? value.split("-").reverse().join("/") : "";
+  }
+
+  function rappelSuspendu(etat) {
+    return etat === "A remplacer" || etat === "Dangereux (A abattre)";
+  }
+
+  function renderRappelElagagePreview() {
+    const output = el("rappelElagageStatus");
+    if (!output) return;
+    const active = el("rappelElagageActif").checked;
+    const last = el("dernierElagageDate").value;
+    const next = rappelNextDate(last);
+    output.textContent = !active ? "Rappel désactivé pour cet arbre." : rappelSuspendu(etatEl().value)
+      ? "Rappel suspendu pour un arbre à abattre ou à remplacer."
+      : !next ? "Renseignez la date du dernier élagage réalisé."
+      : `Prochain élagage : ${rappelDateLisible(next)}${next <= rappelToday() ? " — À programmer" : ""}.`;
+    if (rappelElagageDirty) output.textContent += " Cliquez sur Enregistrer pour conserver ces réglages.";
+  }
+
+  function setRappelElagageForm(tree) {
+    if (!el("dernierElagageDate")) return;
+    el("dernierElagageDate").value = tree?.dernierElagageDate || "";
+    el("dernierElagageDate").max = rappelToday();
+    el("rappelElagageActif").checked = tree?.rappelElagageActif === true;
+    rappelElagageDirty = false;
+    renderRappelElagagePreview();
+  }
+
+  function rappelElagagePayload() {
+    if (!rappelElagageDirty || !isAdmin()) return {};
+    const date = el("dernierElagageDate").value;
+    const active = el("rappelElagageActif").checked;
+    if ((active && !rappelDateValide(date)) || (date && (!rappelDateValide(date) || date > rappelToday()))) {
+      alert("Indiquez une date valide, passée ou aujourd’hui, pour le dernier élagage réalisé.");
+      return null;
+    }
+    return { dernierElagageDate: date, rappelElagageActif: active, rappelElagageConfigModifiee: true };
+  }
+
+  window.prepareElagageReminderValidation = function () {
+    const etat = etatEl().value;
+    if (rappelSuspendu(etat)) return true;
+    const nature = natureTravauxEl().value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    const pruning = (/\b(elagage|elaguer|elague|elaguee|taille|tailler|taillee)s?\b/.test(nature) && !/\b(abattage|dessouchage)\b/.test(nature)) || (!nature && etat.startsWith("A élaguer"));
+    if (!pruning) return true;
+    const date = dateExecutionEl().value;
+    if (!rappelDateValide(date) || date > rappelToday()) {
+      alert("Indiquez la date d’exécution de l’élagage pour calculer le rappel dans cinq ans.");
+      dateExecutionEl().focus();
+      return false;
+    }
+    const current = selectedId ? getTreeById(selectedId) : null;
+    const previous = el("dernierElagageDate").value;
+    el("dernierElagageDate").value = previous && previous > date ? previous : date;
+    if (!current?.rappelElagageConfigure && !rappelElagageDirty) el("rappelElagageActif").checked = true;
+    rappelElagageDirty = true;
+    renderRappelElagagePreview();
+    return true;
+  };
+
+  function renderRappelsElagage() {
+    const list = el("rappelsElagageList");
+    if (!list) return;
+    const today = rappelToday();
+    const due = getVisibleTrees().filter(tree => tree.rappelElagageActif && !rappelSuspendu(tree.etat) &&
+      rappelDateValide(tree.dernierElagageDate) && rappelNextDate(tree.dernierElagageDate) <= today)
+      .sort((a, b) => rappelNextDate(a.dernierElagageDate).localeCompare(rappelNextDate(b.dernierElagageDate)));
+    el("rappelsElagageCount").textContent = String(due.length);
+    list.replaceChildren();
+    if (!due.length) {
+      const empty = document.createElement("p"); empty.className = "hint";
+      empty.textContent = "Aucun rappel d’élagage arrivé à échéance."; list.appendChild(empty);
+    }
+    due.forEach(tree => {
+      const row = document.createElement("div"); row.className = "treeItem";
+      const info = document.createElement("div");
+      const name = document.createElement("b"); name.textContent = `${tree.species || "Arbre"} — ${tree.id}`;
+      const date = document.createElement("small"); date.textContent = `À programmer depuis le ${rappelDateLisible(rappelNextDate(tree.dernierElagageDate))}${tree.secteur ? " • " + tree.secteur : ""}`;
+      info.append(name, date);
+      const open = document.createElement("button"); open.type = "button"; open.className = "secondary"; open.textContent = "Voir";
+      open.onclick = () => {
+        if (!canConsultPastilleTree() && isPastilleTree(tree)) return alert("⛔ Arbre verrouillé (pastille)");
+        setSelected(tree.id); highlightListSelection(); map.setView([tree.lat, tree.lng], Math.max(map.getZoom(), 16));
+      };
+      row.append(info, open); list.appendChild(row);
+    });
+  }
+
+  function showRappelEmailConfig(config) {
+    el("rappelElagageEmail").value = config.email || "";
+    el("rappelElagageEmailActif").checked = config.emailActif === true;
+    el("rappelElagageEmailStatus").textContent = config.declencheurInstalle
+      ? (config.emailActif ? "Envoi automatique activé. Un e-mail est envoyé pour chaque nouvelle échéance atteinte." : "Envoi par e-mail désactivé.")
+      : "Pour l’envoi lorsque l’application est fermée, exécutez une fois INSTALLER_RAPPELS_ELAGAGE dans Apps Script.";
+  }
+
+  function wireRappelsElagage() {
+    ["dernierElagageDate", "rappelElagageActif"].forEach(id => el(id)?.addEventListener("change", () => {
+      rappelElagageDirty = true; renderRappelElagagePreview();
+    }));
+    etatEl().addEventListener("change", renderRappelElagagePreview);
+    const settings = el("rappelElagageEmailConfig");
+    if (settings) settings.hidden = !isAdmin();
+    if (isAdmin()) {
+      postToGAS({ action: "getRappelsElagageConfig" }).then(res => {
+        if (!res?.ok || !res.result) throw new Error("Configuration indisponible");
+        showRappelEmailConfig(res.result);
+      }).catch(() => { el("rappelElagageEmailStatus").textContent = "Configuration des e-mails indisponible. Vérifiez le déploiement Apps Script."; });
+      el("saveRappelElagageEmail").onclick = async () => {
+        const button = el("saveRappelElagageEmail");
+        button.disabled = true;
+        try {
+          const res = await postToGAS({ action: "saveRappelsElagageConfig", email: el("rappelElagageEmail").value.trim(), emailActif: el("rappelElagageEmailActif").checked });
+          if (!res?.ok || !res.result) throw new Error(res?.error || "Enregistrement impossible");
+          showRappelEmailConfig(res.result);
+        } catch (error) {
+          el("rappelElagageEmailStatus").textContent = "Configuration non enregistrée : " + (error?.message || "réessayez");
+        } finally { button.disabled = false; }
+      };
+    }
+    renderRappelsElagage();
+  }
+
+  setInterval(() => {
+    renderRappelsElagage();
+    if (el("rappelElagageStatus")) renderRappelElagagePreview();
+  }, 60000);
+
 })();
 
     
@@ -2164,6 +2327,7 @@ function handleValiderIntervention_() {
     alert("Renseignez les travaux à valider.");
     return;
   }
+  if (!window.prepareElagageReminderValidation()) return;
   appendToHistoryUI_(line);
   const txt = (document.getElementById("historyInterventions")?.value || "").trim();
   setSelectedTreeHistory_(txt);
