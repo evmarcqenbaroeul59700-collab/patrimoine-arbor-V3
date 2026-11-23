@@ -1,0 +1,1357 @@
+/*******************************
+ * PATRIMOINE ARBORÉ — SCRIPT COMPLET
+ * Export PDF annuel, validation réversible et rappels d’élagage à cinq ans intégrés.
+ * Renseigner les mots de passe réels dans USERS avant le déploiement.
+ *******************************/
+const SPREADSHEET_ID = "1Q-HaZs_nMcJRiH0lNu-NpYbdlvWFNWSK8dQPGl9vJNU";
+const SHEET_TRAVAUX = "tableau_Elagages/Abattages";
+const SHEET_PATRIMOINE = "Patrimoine_arboré";
+const SHEET_HISTORIQUE = "Historique";
+const DRIVE_FOLDER_ID = "1bC7CsCGBeQNp5ADelZ0SIXGjo12uhiUS";
+const MAIRIE_LOGO_URL = "https://raw.githubusercontent.com/Cedrico59/patrimoine-arbor-V3/main/logo-marcq.png";
+const BASE_FICHE_URL = "https://cedrico59.github.io/patrimoine-arbor-V3";
+const PDF_MARGIN_INCH = 0.5;
+const FONT_TITLE = 22;
+const FONT_SUBTITLE = 19;
+const FONT_SECTION = 18;
+const FONT_BODY = 14;
+const FONT_META = 14;
+const FONT_LEGAL = 14;
+
+function myFunction() {}
+
+function TEST_DRIVE_LINKED() {
+  DriveApp.createFile("test_linked_drive.txt", "OK");
+}
+
+/* =========================
+   HISTORIQUE DES MODIFICATIONS
+========================= */
+function getOrCreateHistorySheet_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sh = ss.getSheetByName(SHEET_HISTORIQUE);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_HISTORIQUE);
+    sh.appendRow(["timestamp", "login", "role", "secteurUser", "action", "treeId", "details"]);
+  }
+  return sh;
+}
+
+function logHistory_(meta, action, treeId, detailsObj) {
+  try {
+    getOrCreateHistorySheet_().appendRow([
+      new Date(), (meta && meta.login) || "", (meta && meta.role) || "",
+      (meta && meta.secteur) || "", action || "", treeId || "",
+      JSON.stringify(detailsObj || {})
+    ]);
+  } catch (e) {
+    Logger.log("Historique erreur: " + e);
+  }
+}
+
+function getTreeRowAsObject_(sheet, treeId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  const validationColumn = getValidationEntrepriseColumn_(sheet);
+  const rappelColumns = rappelElagageColonnes_(sheet);
+  const rappelTz = SpreadsheetApp.openById(SPREADSHEET_ID).getSpreadsheetTimeZone();
+  const values = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[1]).trim() === String(treeId).trim()) {
+      return {
+        ...rappelElagageInfos_(row, rappelColumns, rappelTz, rappelElagageAujourdhui_()),
+        _rowIndex: i + 2, id: row[1], lat: row[2], lng: row[3], species: row[4],
+        height: row[5], dbh: row[6], secteur: row[7], address: row[8], tags: row[9],
+        historiqueInterventions: row[10], comment: row[11], photos: row[12],
+        etat: row[13], updatedAt: row[14],
+        validationEntreprise: validationColumn ? validationEntrepriseBoolean_(row[validationColumn - 1]) : false
+      };
+    }
+  }
+  return null;
+}
+
+function diffObjects_(before, after) {
+  if (!before) return [{ field: "__NEW__", from: null, to: (after && after.id) || "" }];
+  const keys = ["lat", "lng", "species", "height", "dbh", "secteur", "address", "tags", "historiqueInterventions", "comment", "photos", "etat", "validationEntreprise"];
+  const changes = [];
+  keys.forEach(k => {
+    const a = before[k], b = after[k];
+    const sa = a === null || a === undefined ? "" : String(a);
+    const sb = b === null || b === undefined ? "" : String(b);
+    if (sa !== sb) changes.push({ field: k, from: a, to: b });
+  });
+  return changes;
+}
+
+/* =========================
+   AUTHENTIFICATION
+   Remettre ici les mots de passe privés de votre projet existant.
+   Un compte sans mot de passe configuré ne peut pas se connecter.
+========================= */
+const USERS = {
+  admin: { password: "marcq2026", role: "admin", secteur: "" },
+
+  "Hautes Loges - Briqueterie": { password: "HLB2026", role: "secteur", secteur: "Hautes Loges - Briqueterie" },
+  "Bourg": { password: "BOURG2026", role: "secteur", secteur: "Bourg" },
+  "Buisson - Delcencerie": { password: "BD2026", role: "secteur", secteur: "Buisson - Delcencerie" },
+  "Mairie - Quesne": { password: "MQ2026", role: "secteur", secteur: "Mairie - Quesne" },
+  "Pont - Plouich - Clémenceau": { password: "PPC2026", role: "secteur", secteur: "Pont - Plouich - Clémenceau" },
+  "Cimetière Delcencerie": { password: "CD2026", role: "secteur", secteur: "Cimetière Delcencerie" },
+  "Cimetière Pont": { password: "CP2026", role: "secteur", secteur: "Cimetière Pont" },
+  "Hippodrome": { password: "HIP2026", role: "secteur", secteur: "Hippodrome" },
+  "Ferme aux Oies": { password: "FAO2026", role: "secteur", secteur: "Ferme aux Oies" },
+  "Perilhon": { password: "PERILHON2026",role: "entreprise", secteur: "Perilhon"}
+
+
+};
+
+const TOKEN_STORE = PropertiesService.getScriptProperties();
+const TOKEN_TTL_MS = 1000 * 60 * 60 * 12;
+
+function createToken_() {
+  const token = Utilities.getUuid();
+  TOKEN_STORE.setProperty(token, String(Date.now()));
+  return token;
+}
+
+function setTokenMeta_(token, meta) {
+  if (!token || !meta) return;
+  TOKEN_STORE.setProperty("meta_" + token, JSON.stringify(meta));
+}
+
+function getTokenMeta_(token) {
+  if (!token) return null;
+  const raw = TOKEN_STORE.getProperty("meta_" + token);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+function isValidToken_(token) {
+  if (!token) return false;
+  const ts = TOKEN_STORE.getProperty(token);
+  if (!ts) return false;
+  const age = Date.now() - Number(ts);
+  if (!Number.isFinite(age) || age > TOKEN_TTL_MS) {
+    TOKEN_STORE.deleteProperty(token);
+    TOKEN_STORE.deleteProperty("meta_" + token);
+    return false;
+  }
+  return true;
+}
+
+function authFail_() {
+  return jsonResponse({ ok: false, error: "unauthorized" });
+}
+
+/* Validation entreprise : colonne repérée par son en-tête, puis ajoutée
+ * à droite des colonnes existantes lorsqu'une écriture est nécessaire. */
+function validationEntrepriseBoolean_(value) {
+  return value === true || value === 1 || ["true", "1", "vrai", "oui"].includes(String(value || "").trim().toLowerCase());
+}
+
+function getValidationEntrepriseColumn_(sheet, createIfMissing = false) {
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn > 0) {
+    const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+    const index = headers.findIndex(header => String(header || "").trim().toLowerCase().replace(/[\s_-]+/g, "") === "validationentreprise");
+    if (index !== -1) return index + 1;
+  }
+  if (!createIfMissing) return 0;
+  const column = Math.max(lastColumn, 15) + 1;
+  if (sheet.getMaxColumns() < column) sheet.insertColumnsAfter(sheet.getMaxColumns(), column - sheet.getMaxColumns());
+  sheet.getRange(1, column).setValue("validationEntreprise");
+  return column;
+}
+
+function canValidateEntreprise_(meta) {
+  const role = String((meta && meta.role) || "").trim().toLowerCase();
+  const secteur = String((meta && meta.secteur) || "").trim().toLowerCase();
+  return role === "admin" || (role === "entreprise" && secteur === "perilhon");
+}
+
+function handleValidationEntreprise_(data, meta) {
+  if (!canValidateEntreprise_(meta)) throw new Error("VALIDATION_ENTREPRISE_INTERDITE");
+  const treeId = String(data.treeId || "").trim();
+  if (!treeId) throw new Error("ID_ARBRE_MANQUANT");
+  const value = data.validationEntreprise === undefined ? true : validationEntrepriseBoolean_(data.validationEntreprise);
+  const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_PATRIMOINE);
+  if (!sheet) throw new Error("SHEET_PATRIMOINE_INTROUVABLE");
+  if (sheet.getLastRow() < 2) throw new Error("ARBRE_INTROUVABLE");
+  const ids = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues();
+  const index = ids.findIndex(row => String(row[0]).trim() === treeId);
+  if (index === -1) throw new Error("ARBRE_INTROUVABLE");
+  const column = getValidationEntrepriseColumn_(sheet, true);
+  const previous = validationEntrepriseBoolean_(sheet.getRange(index + 2, column).getValue());
+  const updatedAt = Date.now();
+  sheet.getRange(index + 2, column).setValue(value);
+  sheet.getRange(index + 2, 15).setValue(updatedAt);
+  SpreadsheetApp.flush();
+  logHistory_(meta, "VALIDATION_ENTREPRISE", treeId, { from: previous, to: value });
+  return { status: "VALIDATION_ENTREPRISE_UPDATED", treeId: treeId, validationEntreprise: value, updatedAt: updatedAt };
+}
+
+/* =========================
+   GET
+========================= */
+function doGet(e) {
+  const token = e && e.parameter && e.parameter.token;
+  if (!isValidToken_(token)) return authFail_();
+  if (e && e.parameter && e.parameter.action === "history") return handleHistoryGet_(e);
+  return handleTreesAndTravauxGet_();
+}
+
+function handleHistoryGet_(e) {
+  const treeId = String((e && e.parameter && e.parameter.id) || "").trim();
+  const limit = Number((e && e.parameter && e.parameter.limit) || 50);
+  if (!treeId) return jsonResponse({ ok: false, error: "id manquant" });
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const hist = ss.getSheetByName(SHEET_HISTORIQUE);
+  if (!hist) return jsonResponse({ ok: true, history: [] });
+  const last = hist.getLastRow();
+  if (last < 2) return jsonResponse({ ok: true, history: [] });
+  const rows = hist.getRange(2, 1, last - 1, hist.getLastColumn()).getValues();
+  const out = [];
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (String(rows[i][5]).trim() === treeId) {
+      out.push({
+        timestamp: rows[i][0], login: rows[i][1], role: rows[i][2],
+        secteurUser: rows[i][3], action: rows[i][4], treeId: rows[i][5], details: rows[i][6]
+      });
+      if (out.length >= limit) break;
+    }
+  }
+  return jsonResponse({ ok: true, history: out });
+}
+
+function handleTreesAndTravauxGet_() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_PATRIMOINE);
+  const sheetTravaux = ss.getSheetByName(SHEET_TRAVAUX);
+  if (!sheet) return jsonResponse({ ok: false, error: "SHEET_PATRIMOINE_INTROUVABLE" });
+  const travauxMap = {};
+  if (sheetTravaux && sheetTravaux.getLastRow() > 1) {
+    const valuesT = sheetTravaux.getRange(2, 1, sheetTravaux.getLastRow() - 1, sheetTravaux.getLastColumn()).getValues();
+    valuesT.forEach(r => {
+      const treeId = String(r[0]).trim();
+      if (!treeId) return;
+      travauxMap[treeId] = {
+        etat: r[1] || "", secteur: r[2] || "", dateDemande: formatDateForInput(r[3]),
+        natureTravaux: r[4] || "", address: r[5] || "", species: r[6] || "",
+        dateDemandeDevis: formatDateForInput(r[7]), devisNumero: r[8] || "", montantDevis: r[9] || "",
+        dateExecution: formatDateForInput(r[10]), remarquesTravaux: r[11] || "",
+        numeroBDC: r[12] || "", numeroFacture: r[13] || ""
+      };
+    });
+  }
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return jsonResponse([]);
+  const values = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+  const validationColumn = getValidationEntrepriseColumn_(sheet);
+  const rappelColumns = rappelElagageColonnes_(sheet);
+  const rappelTz = ss.getSpreadsheetTimeZone();
+  const rappelToday = rappelElagageAujourdhui_();
+  const trees = values.map(row => {
+    const id = row[1];
+    const travaux = travauxMap[String(id).trim()] || {};
+    return {
+      ...rappelElagageInfos_(row, rappelColumns, rappelTz, rappelToday),
+      createdAt: row[0] && row[0].getTime ? row[0].getTime() : null,
+      id: id, lat: Number(row[2]), lng: Number(row[3]), species: row[4],
+      height: row[5] !== "" ? Number(row[5]) : null, dbh: row[6] !== "" ? Number(row[6]) : null,
+      secteur: row[7], address: row[8],
+      tags: row[9] ? String(row[9]).split(",").map(s => s.trim()).filter(Boolean) : [],
+      historiqueInterventions: row[10] || "", comment: row[11],
+      photos: (() => { try { return row[12] ? JSON.parse(row[12]) : []; } catch (e) { return []; } })(),
+      etat: String(row[13] || "").trim(), updatedAt: row[14] ? Number(row[14]) : null,
+      validationEntreprise: validationColumn ? validationEntrepriseBoolean_(row[validationColumn - 1]) : false,
+      secteurTravaux: travaux.secteur || "", dateDemande: travaux.dateDemande || "",
+      natureTravaux: travaux.natureTravaux || "", dateDemandeDevis: travaux.dateDemandeDevis || "",
+      devisNumero: travaux.devisNumero || "", montantDevis: travaux.montantDevis || "",
+      dateExecution: travaux.dateExecution || "", remarquesTravaux: travaux.remarquesTravaux || "",
+      numeroBDC: travaux.numeroBDC || "", numeroFacture: travaux.numeroFacture || ""
+    };
+  }).filter(t => t.id && Number.isFinite(t.lat) && Number.isFinite(t.lng));
+  return jsonResponse(trees);
+}
+
+/* =========================
+   DRIVE ET PHOTOS
+========================= */
+function getOrCreateTreeFolder(treeId) {
+  const root = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+  const folders = root.getFoldersByName(treeId);
+  return folders.hasNext() ? folders.next() : root.createFolder(treeId);
+}
+
+function uploadPhoto(base64, filename, treeId) {
+  if (!base64 || !base64.startsWith("data:")) return null;
+  const folder = getOrCreateTreeFolder(treeId);
+  const match = base64.match(/^data:(.*);base64,/);
+  if (!match) return null;
+  const bytes = Utilities.base64Decode(base64.split(",")[1]);
+  const blob = Utilities.newBlob(bytes, match[1], filename);
+  const file = folder.createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return { driveId: file.getId(), folderId: folder.getId(), url: file.getUrl(), name: filename, addedAt: Date.now() };
+}
+
+function deletePhotoFromDrive(driveId) {
+  try {
+    if (!driveId) return false;
+    DriveApp.getFileById(driveId).setTrashed(true);
+    return true;
+  } catch (e) {
+    Logger.log("Erreur suppression photo Drive: " + e);
+    return false;
+  }
+}
+
+function assertSheetAlive() {
+  if (DriveApp.getFileById(SPREADSHEET_ID).isTrashed()) throw new Error("❌ Le Spreadsheet est dans la corbeille !");
+}
+
+function deleteTreeFolderById(folderId) {
+  try { if (folderId) DriveApp.getFolderById(folderId).setTrashed(true); }
+  catch (e) { Logger.log("Erreur suppression dossier arbre: " + e); }
+}
+
+/* =========================
+   POST : CONNEXION, EXPORTS ET ÉCRITURES
+========================= */
+function doPost(e) {
+  try {
+    const actionParam = e && e.parameter && e.parameter.action;
+    if (actionParam === "login") {
+      const login = String((e && e.parameter && e.parameter.login) || "").trim();
+      const pwd = String((e && e.parameter && e.parameter.password) || "");
+      const user = USERS[login];
+      if (!user || !user.password || pwd !== user.password) return authFail_();
+      const token = createToken_();
+      setTokenMeta_(token, { role: user.role, secteur: user.secteur || "", login: login });
+      return jsonResponse({ ok: true, token: token, role: user.role, secteur: user.secteur || "", login: login });
+    }
+    const token = e && e.parameter && e.parameter.token;
+    if (!isValidToken_(token)) return authFail_();
+    const meta = getTokenMeta_(token);
+    let data = {};
+    if (e && e.parameter && Object.keys(e.parameter).length) {
+      data = e.parameter.payload ? JSON.parse(e.parameter.payload) : { ...e.parameter };
+    } else if (e && e.postData && e.postData.contents) {
+      data = JSON.parse(e.postData.contents);
+    } else {
+      throw new Error("Aucun payload reçu");
+    }
+    if (data && data.payload) data = data.payload;
+    if (data && typeof data === "object") { delete data.token; delete data.password; }
+
+    if (data.action === "exportArbrePDF" && data.id) {
+      return jsonResponse(exportHistoriqueArbreToPDF_(String(data.id).trim(), meta));
+    }
+    if (data.action === "exportAnnuelPDF" && data.year) {
+      return jsonResponse(exportHistoriqueAnnuelToPDF_(Number(data.year), meta));
+    }
+    if (data.action === "exportSurveillancePDF") return jsonResponse(exportArbresASurveillerPDF_(meta));
+    if (data.action === "exportAbattagesPDF") return jsonResponse(exportAbattagesPDF_(meta));
+    if (data.action === "exportElagagesPDF") return jsonResponse(exportElagagesPDF_(meta));
+
+    if (data.action === "validateEntreprise") return ok(handleValidationEntreprise_(data, meta));
+    if (data.action === "getRappelsElagageConfig") return ok(getRappelsElagageConfig_(meta));
+    if (data.action === "saveRappelsElagageConfig") return ok(saveRappelsElagageConfig_(data, meta));
+
+    if (data.action === "validateIntervention" && data.id && data.intervention) {
+      assertAdmin_(meta);
+      const sheetVI = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_PATRIMOINE);
+      if (!sheetVI) return ok({ status: "SHEET_NOT_FOUND" });
+      const lastVI = sheetVI.getLastRow();
+      if (lastVI > 1) {
+        const rowsVI = sheetVI.getRange(2, 1, lastVI - 1, sheetVI.getLastColumn()).getValues();
+        for (let i = 0; i < rowsVI.length; i++) {
+          if (String(rowsVI[i][1]).trim() === String(data.id).trim()) {
+            const beforeVI = getTreeRowAsObject_(sheetVI, data.id);
+            const existing = String(rowsVI[i][10] || "").trim();
+            const rappelVI = rappelElagagePreparer_(sheetVI, beforeVI, {
+              historiqueInterventions: existing + (existing ? "\n" : "") + String(data.intervention),
+              etat: beforeVI.etat, validationEntrepriseResetRequested: true
+            }, meta);
+            sheetVI.getRange(i + 2, 11).setValue(existing + (existing ? "\n" : "") + String(data.intervention));
+            sheetVI.getRange(i + 2, 15).setValue(Date.now());
+            if (String(rowsVI[i][13] || "").trim() === "Dangereux (A abattre)") {
+              sheetVI.getRange(i + 2, 14).setValue("A remplacer");
+              colorRowByEtat(sheetVI, i + 2, "A remplacer");
+              const suivi = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_TRAVAUX);
+              if (suivi) {
+                const suiviRow = findRowById_(suivi, String(data.id).trim());
+                if (suiviRow !== -1) {
+                  suivi.getRange(suiviRow, 2).setValue("A remplacer");
+                  colorEtatTravaux(suivi, suiviRow, "A remplacer");
+                }
+              }
+            }
+            const validationColumnVI = getValidationEntrepriseColumn_(sheetVI);
+            if (validationColumnVI) sheetVI.getRange(i + 2, validationColumnVI).setValue(false);
+            rappelElagageEcrire_(sheetVI, i + 2, rappelVI);
+            SpreadsheetApp.flush();
+            logHistory_(meta, "VALIDATE_INTERVENTION", data.id, { added: data.intervention });
+            return ok({ status: "INTERVENTION_ADDED", etat: sheetVI.getRange(i + 2, 14).getValue(), validationEntreprise: false });
+          }
+        }
+      }
+      return ok({ status: "NOT_FOUND" });
+    }
+    if (meta && String(meta.role || "").toLowerCase() === "secteur") data.secteur = meta.secteur || data.secteur || "";
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName(SHEET_PATRIMOINE);
+    if (!sheet) throw new Error("SHEET_PATRIMOINE_INTROUVABLE");
+    const lastRow = sheet.getLastRow();
+
+    if (data.action === "deletePhoto" && data.photoDriveId && data.treeId) {
+      logHistory_(meta, "DELETE_PHOTO", data.treeId, { photoDriveId: data.photoDriveId });
+      const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][1]).trim() === String(data.treeId).trim()) {
+          let photos = [];
+          try { photos = rows[i][12] ? JSON.parse(rows[i][12]) : []; } catch (err) { photos = []; }
+          deletePhotoFromDrive(String(data.photoDriveId).trim());
+          const newPhotos = photos.filter(p => String(p.driveId || "").trim() !== String(data.photoDriveId).trim());
+          sheet.getRange(i + 2, 13).setValue(JSON.stringify(newPhotos));
+          SpreadsheetApp.flush();
+          return ok({ status: "PHOTO_DELETED", remaining: newPhotos.length });
+        }
+      }
+      return ok({ status: "NOT_FOUND" });
+    }
+
+    if (data.action === "delete" && data.id) {
+      if (lastRow < 2) return ok({ status: "NOT_FOUND" });
+      const beforeObjDelete = getTreeRowAsObject_(sheet, data.id);
+      logHistory_(meta, "DELETE", data.id, { deletedRow: beforeObjDelete || null });
+      const rows = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][1]).trim() === String(data.id).trim()) {
+          if (beforeObjDelete && beforeObjDelete.photos) {
+            try {
+              const photos = JSON.parse(beforeObjDelete.photos);
+              const folderId = photos.find(p => p.folderId)?.folderId;
+              if (folderId) deleteTreeFolderById(folderId);
+            } catch (e) { Logger.log("Erreur suppression dossier Drive: " + e); }
+          }
+          sheet.deleteRow(i + 2);
+          sortArbresSheet_(sheet);
+          SpreadsheetApp.flush();
+          return ok({ status: "DELETED" });
+        }
+      }
+      return ok({ status: "NOT_FOUND" });
+    }
+
+    if (!data.id) throw new Error("id manquant (create/update)");
+    if (typeof data.tags === "string") {
+      try { data.tags = JSON.parse(data.tags); }
+      catch (err) { data.tags = String(data.tags).split(",").map(s => s.trim()).filter(Boolean); }
+    }
+    if (typeof data.photos === "string") {
+      try { data.photos = JSON.parse(data.photos); } catch (err) { data.photos = []; }
+    }
+    const beforeObj = getTreeRowAsObject_(sheet, data.id);
+    const rappelUpdate = rappelElagagePreparer_(sheet, beforeObj, data, meta);
+    if (String((meta && meta.role) || "").toLowerCase() === "admin" &&
+        validationEntrepriseBoolean_(data.validationEntrepriseResetRequested) &&
+        beforeObj && beforeObj.etat === "Dangereux (A abattre)") {
+      data.etat = "A remplacer";
+    }
+    let validationEntreprise = beforeObj ? beforeObj.validationEntreprise : false;
+    if (canValidateEntreprise_(meta)) {
+      // Sur un arbre existant, le bouton dédié enregistre les deux états.
+      // Une ancienne fiche ouverte avec true ou false ne doit pas annuler
+      // le choix enregistré depuis un autre appareil.
+      if (!beforeObj && validationEntrepriseBoolean_(data.validationEntreprise)) validationEntreprise = true;
+      // La validation d'une intervention par l'administrateur retire la croix.
+      if (String(meta.role || "").toLowerCase() === "admin" && validationEntrepriseBoolean_(data.validationEntrepriseResetRequested)) validationEntreprise = false;
+    }
+    const validationColumn = getValidationEntrepriseColumn_(sheet, true);
+    let existingPhotos = [];
+    if (lastRow > 1) {
+      const rows = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).getValues();
+      for (let i = 0; i < rows.length; i++) {
+        if (String(rows[i][1]).trim() === String(data.id).trim()) {
+          try { existingPhotos = rows[i][12] ? JSON.parse(rows[i][12]) : []; } catch (err) { existingPhotos = []; }
+          break;
+        }
+      }
+    }
+    let uploadedPhotos = [];
+    if (Array.isArray(data.photos)) {
+      uploadedPhotos = data.photos.map(p => uploadPhoto(p.dataUrl, `${Date.now()}_${p.name || "photo.jpg"}`, data.id)).filter(Boolean);
+    }
+    const allPhotos = existingPhotos.concat(uploadedPhotos);
+    const rowData = [
+      new Date(), data.id || "", data.lat || "", data.lng || "", data.species || "",
+      data.height || "", data.dbh || "", data.secteur || "", data.address || "",
+      (data.tags || []).join(","), data.historiqueInterventions || "", data.comment || "",
+      JSON.stringify(allPhotos), data.etat || "", data.updatedAt || Date.now()
+    ];
+    let isUpdate = false;
+    if (lastRow > 1) {
+      const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+      for (let i = 0; i < ids.length; i++) {
+        if (String(ids[i][0]).trim() === String(data.id).trim()) {
+          sheet.getRange(i + 2, 1, 1, rowData.length).setValues([rowData]);
+          sheet.getRange(i + 2, validationColumn).setValue(validationEntreprise);
+          rappelElagageEcrire_(sheet, i + 2, rappelUpdate);
+          sortArbresSheet_(sheet);
+          recolorOneArbreById_(sheet, data.id);
+          isUpdate = true;
+          break;
+        }
+      }
+    }
+    if (!isUpdate) {
+      sheet.appendRow(rowData);
+      sheet.getRange(sheet.getLastRow(), validationColumn).setValue(validationEntreprise);
+      rappelElagageEcrire_(sheet, sheet.getLastRow(), rappelUpdate);
+      sortArbresSheet_(sheet);
+      recolorOneArbreById_(sheet, data.id);
+    }
+    syncTravaux_(data);
+    SpreadsheetApp.flush();
+    const afterObj = {
+      id: data.id, lat: data.lat || "", lng: data.lng || "", species: data.species || "",
+      height: data.height || "", dbh: data.dbh || "", secteur: data.secteur || "", address: data.address || "",
+      tags: (data.tags || []).join(","), historiqueInterventions: data.historiqueInterventions || "",
+      comment: data.comment || "", photos: JSON.stringify(allPhotos || []), etat: data.etat || "",
+      validationEntreprise: validationEntreprise
+    };
+    logHistory_(meta, isUpdate ? "UPDATE" : "CREATE", data.id, { changes: diffObjects_(beforeObj, afterObj) });
+    return ok({ status: isUpdate ? "UPDATED" : "CREATED", photos: allPhotos, validationEntreprise: validationEntreprise });
+  } catch (err) {
+    return jsonResponse({ ok: false, error: String(err) });
+  }
+}
+
+/* =========================
+   SYNCHRONISATION DES TRAVAUX
+========================= */
+function syncTravaux_(data) {
+  const etatArbre = String(data.etat || "").trim();
+  const ETATS_TRAVAUX = ["Dangereux (A abattre)", "A remplacer", "A surveiller", "A élaguer (URGENT)", "A élaguer (Moyen)", "A élaguer (Faible)"];
+  if (!ETATS_TRAVAUX.includes(etatArbre)) return;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheetTravaux = ss.getSheetByName(SHEET_TRAVAUX);
+  if (!sheetTravaux) return;
+  const travauxRow = [
+    data.id || "", etatArbre || "", data.secteur || "", data.dateDemande || "", data.natureTravaux || "",
+    data.address || "", data.species || "", data.dateDemandeDevis || "", data.devisNumero || "", data.montantDevis || "",
+    data.dateExecution || "", data.remarquesTravaux || "", data.numeroBDC || "", data.numeroFacture || ""
+  ];
+  const lastTravaux = sheetTravaux.getLastRow();
+  let foundTravaux = false;
+  if (lastTravaux > 1) {
+    const idsTravaux = sheetTravaux.getRange(2, 1, lastTravaux - 1, 1).getValues();
+    for (let i = 0; i < idsTravaux.length; i++) {
+      if (String(idsTravaux[i][0]).trim() === String(data.id).trim()) {
+        const rowIndex = i + 2;
+        sheetTravaux.getRange(rowIndex, 1, 1, travauxRow.length).setValues([travauxRow]);
+        colorEtatTravaux(sheetTravaux, rowIndex, etatArbre);
+        sortTravauxSheet_(sheetTravaux);
+        recolorOneTravauxById_(sheetTravaux, data.id);
+        foundTravaux = true;
+        break;
+      }
+    }
+  }
+  if (!foundTravaux) {
+    sheetTravaux.appendRow(travauxRow);
+    sortTravauxSheet_(sheetTravaux);
+    colorEtatTravaux(sheetTravaux, sheetTravaux.getLastRow(), etatArbre);
+    recolorOneTravauxById_(sheetTravaux, data.id);
+  }
+  syncSurveillance_(data);
+  syncAbattages_(data);
+  syncElagages_(data);
+}
+
+function ok(payload) { return jsonResponse({ ok: true, result: payload }); }
+
+function jsonResponse(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function formatDateForInput(d) {
+  if (!d || Object.prototype.toString.call(d) !== "[object Date]" || isNaN(d.getTime())) return "";
+  const yyyy = d.getFullYear(), mm = String(d.getMonth() + 1).padStart(2, "0"), dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/* =========================
+   TRI ET COULEURS
+========================= */
+function sortArbresSheet_(sheet) {
+  try {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 2) return;
+    sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn()).sort([
+      { column: 8, ascending: true }, { column: 9, ascending: true }, { column: 5, ascending: true }
+    ]);
+  } catch (e) { Logger.log("Tri arbres erreur: " + e); }
+}
+
+function sortTravauxSheet_(sheetTravaux) { return; }
+
+function colorRowByEtat(sheet, rowIndex, etat) {
+  let color = null;
+  if (etat === "Dangereux (A abattre)") color = "#f28b82";
+  if (etat === "A remplacer") color = "#000000";
+  if (etat === "A surveiller") color = "#fbbc04";
+  if (etat === "A élaguer (URGENT)") color = "#FFFF00";
+  if (etat === "A élaguer (Moyen)") color = "#00FFFF";
+  if (etat === "A élaguer (Faible)") color = "#ccff90";
+  sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).setBackground(color || null)
+    .setFontColor(etat === "A remplacer" ? "#ffffff" : "#000000");
+}
+
+function colorEtatTravaux(sheet, rowIndex, etat) {
+  let color = null;
+  if (etat === "Dangereux (A abattre)") color = "#f28b82";
+  if (etat === "A remplacer") color = "#000000";
+  if (etat === "A surveiller") color = "#fbbc04";
+  if (etat === "A élaguer (URGENT)") color = "#FFFF00";
+  if (etat === "A élaguer (Moyen)") color = "#00FFFF";
+  if (etat === "A élaguer (Faible)") color = "#ccff90";
+  sheet.getRange(rowIndex, 2).setBackground(color || null).setFontWeight(color ? "bold" : "normal")
+    .setFontColor(etat === "A remplacer" ? "#ffffff" : "#000000");
+}
+
+function recolorEtatTravauxColumn_(sheetTravaux) {
+  const lastRow = sheetTravaux.getLastRow();
+  if (lastRow < 2) return;
+  const etats = sheetTravaux.getRange(2, 2, lastRow - 1, 1).getValues();
+  etats.forEach((row, i) => colorEtatTravaux(sheetTravaux, i + 2, row[0]));
+}
+
+function recolorTravauxById_(sheetTravaux) {
+  const lastRow = sheetTravaux.getLastRow();
+  if (lastRow < 2) return;
+  const rows = sheetTravaux.getRange(2, 1, lastRow - 1, 2).getValues();
+  rows.forEach((row, i) => {
+    if (String(row[0] || "").trim()) colorEtatTravaux(sheetTravaux, i + 2, String(row[1] || "").trim());
+  });
+}
+
+function recolorArbresRows_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  sheet.getRange(2, 14, lastRow - 1, 1).getValues().forEach((row, i) => colorRowByEtat(sheet, i + 2, row[0]));
+}
+
+function recolorArbresById_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  const etats = sheet.getRange(2, 14, lastRow - 1, 1).getValues();
+  ids.forEach((row, i) => { if (String(row[0] || "").trim()) colorRowByEtat(sheet, i + 2, String(etats[i][0] || "").trim()); });
+}
+
+function recolorOneArbreById_(sheet, treeId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const ids = sheet.getRange(2, 2, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === String(treeId).trim()) {
+      colorRowByEtat(sheet, i + 2, String(sheet.getRange(i + 2, 14).getValue() || "").trim());
+      return;
+    }
+  }
+}
+
+function recolorOneTravauxById_(sheetTravaux, treeId) {
+  const lastRow = sheetTravaux.getLastRow();
+  if (lastRow < 2) return;
+  const ids = sheetTravaux.getRange(2, 1, lastRow - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]).trim() === String(treeId).trim()) {
+      colorEtatTravaux(sheetTravaux, i + 2, String(sheetTravaux.getRange(i + 2, 2).getValue() || "").trim());
+      return;
+    }
+  }
+}
+
+/* =========================
+   OUTILS PDF ET PAGE DE GARDE
+========================= */
+function estimateRowHeight_(text, baseHeight, pxPerLine) {
+  return Math.round(Math.max(baseHeight, Math.max(1, String(text || "").split("\n").length) * pxPerLine));
+}
+
+function assertAdmin_(meta) {
+  if (!meta || String(meta.role || "").toLowerCase() !== "admin") throw new Error("ADMIN_ONLY");
+}
+
+function writeCoverPage_(sheet, title, meta) {
+  sheet.clear();
+  sheet.setHiddenGridlines(true);
+  try { sheet.setPageOrientation(SpreadsheetApp.PageOrientation.PORTRAIT); } catch (e) {}
+  try { sheet.setPaperSize(SpreadsheetApp.PaperSize.A4); } catch (e) {}
+  try { sheet.setMargins({ top: PDF_MARGIN_INCH, bottom: PDF_MARGIN_INCH, left: PDF_MARGIN_INCH, right: PDF_MARGIN_INCH }); } catch (e) {}
+  [255, 128, 160, 200, 420].forEach((width, i) => sheet.setColumnWidths(i + 1, 1, width));
+  sheet.setRowHeights(1, 60, 28);
+  if (MAIRIE_LOGO_URL) {
+    try { sheet.insertImage(UrlFetchApp.fetch(MAIRIE_LOGO_URL).getBlob(), 1, 1).setWidth(180).setHeight(180); }
+    catch (e) { Logger.log("Logo PDF erreur: " + e); }
+  }
+  sheet.getRange("C1").setValue("   VILLE DE MARCQ-EN-BARŒUL").setFontSize(FONT_TITLE).setFontWeight("bold");
+  sheet.getRange("C3").setValue("Gestion du patrimoine arboré communal").setFontSize(FONT_SUBTITLE).setFontWeight("bold");
+  sheet.getRange("B5").setValue(title).setFontSize(FONT_SECTION).setFontWeight("bold");
+  sheet.getRange("A8:E12").merge().setValue(
+    "DOCUMENT ADMINISTRATIF OFFICIEL\n\n" +
+    "Ce document est généré automatiquement par le système d’information de la Ville.\n" +
+    "Il constitue une extraction fidèle et figée des données enregistrées à la date indiquée.\n" +
+    "Toute modification ultérieure des données sources n’affecte pas le présent document."
+  ).setFontSize(FONT_LEGAL).setFontStyle("italic").setWrap(true).setVerticalAlignment("top");
+  try { sheet.setRowHeights(8, 5, 40); } catch (e) {}
+  sheet.getRange("A14").setValue("Date de génération : " + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm"))
+    .setFontSize(FONT_META).setFontStyle("italic");
+  sheet.getRange("A16").setValue("Généré par : " + ((meta && meta.login) ? meta.login : "Administrateur"))
+    .setFontSize(FONT_META).setFontStyle("italic");
+  sheet.getRange("A37:E41").merge().setValue(
+    "Service : Espaces verts \n\nResponsable : ____________________________\n\nSignature : ______________________________"
+  ).setFontSize(FONT_BODY).setFontWeight("bold").setWrap(true).setVerticalAlignment("top");
+  try { sheet.setRowHeights(34, 5, 36); } catch (e) {}
+  sheet.getRange("A40").setValue("—");
+}
+
+function exportHistoriqueArbreToPDF_(treeId, meta) {
+  assertAdmin_(meta);
+  const id = String(treeId || "").trim();
+  if (!id) throw new Error("ID_MANQUANT");
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const source = ss.getSheetByName(SHEET_PATRIMOINE);
+  if (!source) throw new Error("PATRIMOINE_ARBORE_INTROUVABLE");
+  const tmpName = "TMP_EXPORT_ARBRE";
+  const old = ss.getSheetByName(tmpName);
+  if (old) ss.deleteSheet(old);
+  const tmp = ss.insertSheet(tmpName);
+  writeCoverPage_(tmp, `Historique des travaux – Arbre ${id}`, meta);
+  const lastRow = source.getLastRow();
+  if (lastRow < 2) throw new Error("PATRIMOINE_VIDE");
+  const data = source.getRange(2, 1, lastRow - 1, source.getLastColumn()).getValues();
+  let treeObj = null;
+  for (let i = 0; i < data.length; i++) {
+    const row = data[i];
+    if (String(row[1]).trim() === id) {
+      let photos = [];
+      try { photos = row[12] ? JSON.parse(row[12]) : []; } catch (e) { photos = []; }
+      treeObj = { id: String(row[1]).trim(), species: row[4] || "", secteur: row[7] || "", address: row[8] || "", historique: String(row[10] || ""), photos: photos };
+      break;
+    }
+  }
+  if (!treeObj) { ss.deleteSheet(tmp); throw new Error("ARBRE_INTROUVABLE"); }
+  if (!treeObj.historique || !String(treeObj.historique).trim()) treeObj.historique = "Aucune intervention enregistrée à ce jour.";
+  if (Array.isArray(treeObj.photos) && treeObj.photos.length > 0) {
+    const p = treeObj.photos.find(x => x && x.driveId);
+    if (p && p.driveId) {
+      try {
+        const file = DriveApp.getFileById(p.driveId);
+        const downloadUrl = "https://drive.google.com/uc?export=download&id=" + p.driveId;
+        const response = UrlFetchApp.fetch(downloadUrl, { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } });
+        const safeBlob = response.getBlob().setName("photo.png");
+        Logger.log("PHOTO SIZE = " + safeBlob.getBytes().length);
+        Logger.log("PHOTO TYPE = " + safeBlob.getContentType());
+        tmp.insertImage(safeBlob, 1, 22).setWidth(560).setHeight(400);
+        for (let r = 22; r <= 34; r++) tmp.setRowHeight(r, 36);
+      } catch (e) { Logger.log("PHOTO PDF FAIL: " + e); }
+    }
+  }
+  if (BASE_FICHE_URL) {
+    const ficheUrl = `${BASE_FICHE_URL}?id=${encodeURIComponent(treeObj.id)}`;
+    const qrGenUrl = "https://api.qrserver.com/v1/create-qr-code/?size=600x600&data=" + encodeURIComponent(ficheUrl);
+    try {
+      tmp.insertImage(UrlFetchApp.fetch(qrGenUrl).getBlob(), 5, 24).setWidth(150).setHeight(150);
+      tmp.getRange("E30").setValue("Scanner pour consulter\nla fiche en ligne").setFontSize(FONT_META)
+        .setHorizontalAlignment("center").setVerticalAlignment("top").setWrap(true);
+    } catch (e) { Logger.log("QR PDF: " + e); }
+  }
+  const TABLE_START_ROW = 56;
+  tmp.getRange(`A${TABLE_START_ROW}:E${TABLE_START_ROW}`).setValues([["ID Arbre", "Espèce", "Secteur", "Adresse", "Historique des interventions"]])
+    .setFontWeight("bold").setFontSize(FONT_BODY).setWrap(true).setVerticalAlignment("middle");
+  const infoRow = TABLE_START_ROW + 1;
+  tmp.getRange(`A${infoRow}:D${infoRow}`).setValues([[treeObj.id, treeObj.species, treeObj.secteur, treeObj.address]])
+    .setFontSize(FONT_BODY).setVerticalAlignment("middle").setWrap(true);
+  const histRow = infoRow + 1;
+  tmp.getRange(`A${histRow}:E${histRow}`).merge().setValue(treeObj.historique || "")
+    .setFontSize(FONT_BODY).setWrap(true).setVerticalAlignment("top");
+  try { tmp.setRowHeight(histRow, estimateRowHeight_(treeObj.historique, 110, 26)); } catch (e) {}
+  try { tmp.setRowHeights(1, TABLE_START_ROW - 1, 28); } catch (e) {}
+  SpreadsheetApp.flush();
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm");
+  const fileName = `Historique_Arbre_${id}_${now}.pdf`;
+  const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=pdf&gid=${tmp.getSheetId()}` +
+    `&portrait=true&fitw=true&top_margin=${PDF_MARGIN_INCH}&bottom_margin=${PDF_MARGIN_INCH}` +
+    `&left_margin=${PDF_MARGIN_INCH}&right_margin=${PDF_MARGIN_INCH}` +
+    "&sheetnames=false&printtitle=false&fzr=false&gridlines=false&pagenumbers=true";
+  const blob = UrlFetchApp.fetch(url, { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } }).getBlob().setName(fileName);
+  const file = DriveApp.getFolderById(DRIVE_FOLDER_ID).createFile(blob);
+  ss.deleteSheet(tmp);
+  return { ok: true, url: file.getUrl(), fileUrl: file.getUrl(), name: fileName };
+}
+
+/* EXPORT PDF ANNUEL — CORRECTION INTÉGRÉE */
+function annuelDate_(value, timeZone) {
+  if (value === null || value === undefined || value === "") return null;
+  if (Object.prototype.toString.call(value) === "[object Date]") {
+    if (isNaN(value.getTime())) return null;
+    return annuelDate_(Utilities.formatDate(value, timeZone, "yyyy-MM-dd"), timeZone);
+  }
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+    const timestamp = new Date(text);
+    return isNaN(timestamp.getTime()) ? null : annuelDate_(timestamp, timeZone);
+  }
+  let m = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|\s)/);
+  let y, month, day;
+  if (m) {
+    y = Number(m[1]); month = Number(m[2]); day = Number(m[3]);
+  } else {
+    m = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:$|\s|,)/);
+    if (!m) return null;
+    day = Number(m[1]); month = Number(m[2]); y = Number(m[3]);
+  }
+  const check = new Date(Date.UTC(y, month - 1, day));
+  if (check.getUTCFullYear() !== y || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
+  const mm = String(month).padStart(2, "0");
+  const dd = String(day).padStart(2, "0");
+  return { year: y, iso: `${y}-${mm}-${dd}`, display: `${dd}/${mm}/${y}` };
+}
+
+function annuelDateValidation_(text, timeZone) {
+  const m = String(text || "").match(/^[^\d\n]{0,16}(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}\/\d{4})(?=$|[\s\],])/);
+  return m ? annuelDate_(m[1], timeZone) : null;
+}
+
+function annuelChamps_(text) {
+  const fields = {};
+  const re = /\b(dateDemande|natureTravaux|dateDemandeDevis|devisNumero|montantDevis|dateExecution|remarquesTravaux|numeroBDC|numeroFacture)\s*=\s*([^|\n]*)/g;
+  let m;
+  while ((m = re.exec(String(text || ""))) !== null) fields[m[1]] = m[2].trim();
+  return fields;
+}
+
+function annuelHistorique_(text, timeZone) {
+  const entries = [];
+  let current = "";
+  String(text || "").replace(/\r\n?/g, "\n").split("\n").forEach(line => {
+    line = line.trim();
+    if (!line) return;
+    if (annuelDateValidation_(line, timeZone) && current) {
+      entries.push(current);
+      current = "";
+    }
+    current += (current ? "\n" : "") + line;
+  });
+  if (current) entries.push(current);
+  return entries.map(entry => {
+    const fields = annuelChamps_(entry);
+    const execution = annuelDate_(fields.dateExecution, timeZone);
+    const validation = annuelDateValidation_(entry, timeZone);
+    return { text: entry, fields: fields, execution: execution, date: execution || validation };
+  });
+}
+
+function annuelIdentite_(treeId, execution, fields) {
+  if (!execution) return null;
+  const norm = value => String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+  return JSON.stringify([
+    String(treeId).trim(), execution.iso, norm(fields.natureTravaux),
+    norm(fields.devisNumero), norm(fields.numeroBDC), norm(fields.numeroFacture)
+  ]);
+}
+
+function annuelCollecter_(patrimoine, travaux, year, timeZone) {
+  const entries = [];
+  const archived = new Set();
+  const seen = new Set();
+  let undated = 0;
+
+  patrimoine.forEach(row => {
+    const treeId = String(row[1] || "").trim();
+    if (!treeId) return;
+    annuelHistorique_(row[10], timeZone).forEach(entry => {
+      if (!entry.date) { undated++; return; }
+      if (entry.date.year !== year) return;
+      const exact = JSON.stringify([treeId, entry.text]);
+      if (seen.has(exact)) return;
+      seen.add(exact);
+      const identity = annuelIdentite_(treeId, entry.execution, entry.fields);
+      if (identity) archived.add(identity);
+      entries.push({
+        date: entry.date.iso,
+        source: "historique",
+        cells: [treeId, row[4] || "", row[7] || "", row[8] || "", year, entry.text]
+      });
+    });
+  });
+
+  travaux.forEach(row => {
+    const treeId = String(row[0] || "").trim();
+    const execution = annuelDate_(row[10], timeZone);
+    // Une demande ou un devis sans date d'exécution ne constitue pas
+    // à lui seul une intervention exécutée pendant l'année demandée.
+    if (!treeId || !execution || execution.year !== year) return;
+    const fields = {
+      dateDemande: row[3], natureTravaux: row[4], dateDemandeDevis: row[7],
+      devisNumero: row[8], montantDevis: row[9], dateExecution: execution.iso,
+      remarquesTravaux: row[11], numeroBDC: row[12], numeroFacture: row[13]
+    };
+    const identity = annuelIdentite_(treeId, execution, fields);
+    if (archived.has(identity) || seen.has(identity)) return;
+    seen.add(identity);
+    const lines = [
+      "Travaux saisis dans le tableau de suivi",
+      "Date d’exécution : " + execution.display
+    ];
+    [
+      ["Nature des travaux", fields.natureTravaux], ["Devis n°", fields.devisNumero],
+      ["Montant du devis (€)", fields.montantDevis], ["N° BDC", fields.numeroBDC],
+      ["N° facture", fields.numeroFacture], ["Remarques", fields.remarquesTravaux]
+    ].forEach(pair => {
+      if (pair[1] !== "" && pair[1] !== null && pair[1] !== undefined) lines.push(pair[0] + " : " + pair[1]);
+    });
+    entries.push({
+      date: execution.iso,
+      source: "travaux",
+      cells: [treeId, row[6] || "", row[2] || "", row[5] || "", year, lines.join("\n")]
+    });
+  });
+
+  entries.sort((a, b) => a.date.localeCompare(b.date) || String(a.cells[0]).localeCompare(String(b.cells[0])));
+  return {
+    rows: entries.map(entry => entry.cells),
+    count: entries.length,
+    historiqueCount: entries.filter(entry => entry.source === "historique").length,
+    travauxCount: entries.filter(entry => entry.source === "travaux").length,
+    undatedHistoryCount: undated
+  };
+}
+
+function annuelLignesPDF_(rows) {
+  const output = [];
+  rows.forEach(row => {
+    const lines = [];
+    String(row[5]).replace(/\r\n?/g, "\n").split("\n").forEach(part => {
+      while (part.length > 50) {
+        let cut = part.lastIndexOf(" ", 50);
+        if (cut < 20) cut = 50;
+        lines.push(part.slice(0, cut));
+        part = part.slice(cut).replace(/^ /, "");
+      }
+      lines.push(part);
+    });
+    // Plusieurs lignes de tableau pour une description longue : les cellules
+    // restent lisibles et la suite ne disparaît pas au bord de la page PDF.
+    for (let i = 0; i < lines.length; i += 12) {
+      output.push(row.slice(0, 5).concat((i ? "(suite)\n" : "") + lines.slice(i, i + 12).join("\n")));
+    }
+  });
+  return output;
+}
+
+function exportHistoriqueAnnuelToPDF_(year, meta) {
+  assertAdmin_(meta);
+  const y = Number(year);
+  if (!Number.isInteger(y) || y < 2000 || y > 2100) throw new Error("ANNEE_INVALIDE");
+
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const source = ss.getSheetByName(SHEET_PATRIMOINE);
+  if (!source) throw new Error("PATRIMOINE_ARBORE_INTROUVABLE");
+  const readRows = sheet => sheet && sheet.getLastRow() > 1
+    ? sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues()
+    : [];
+  const timeZone = ss.getSpreadsheetTimeZone();
+  const result = annuelCollecter_(readRows(source), readRows(ss.getSheetByName(SHEET_TRAVAUX)), y, timeZone);
+  const pdfRows = annuelLignesPDF_(result.rows);
+
+  let tmp = null;
+  try {
+    // Un nom par export évite qu'une demande supprime le document d'une autre.
+    tmp = ss.insertSheet("TMP_EXPORT_ANNUEL_" + Utilities.getUuid().replace(/-/g, "").slice(0, 12));
+    const tableStart = 56;
+    const lastNeededRow = tableStart + Math.max(1, pdfRows.length);
+    if (tmp.getMaxRows() < lastNeededRow) tmp.insertRowsAfter(tmp.getMaxRows(), lastNeededRow - tmp.getMaxRows());
+    writeCoverPage_(tmp, `                           Historique annuel des travaux – ${y}`, meta);
+    [120, 140, 160, 220, 80, 420].forEach((width, i) => tmp.setColumnWidths(i + 1, 1, width));
+    tmp.setRowHeights(1, tableStart - 1, 28);
+    tmp.getRange("A45:F46").merge()
+      .setValue("Année retenue : date d’exécution des travaux ; à défaut, date de validation dans l’historique.\nLes travaux saisis sans date d’exécution ne sont pas comptés comme travaux exécutés.")
+      .setFontSize(FONT_META).setWrap(true).setVerticalAlignment("top");
+    tmp.setRowHeights(45, 2, 32);
+    tmp.getRange("A48:F49").merge()
+      .setValue(`Interventions retenues : ${result.count} (${result.historiqueCount} dans l’historique, ${result.travauxCount} dans le suivi des travaux).` +
+        (result.undatedHistoryCount ? `\n${result.undatedHistoryCount} entrée(s) d’historique sans date exploitable : année non déterminée.` : ""))
+      .setFontSize(FONT_META).setWrap(true).setVerticalAlignment("top");
+    tmp.setRowHeights(48, 2, 32);
+
+    tmp.getRange(tableStart, 1, 1, 6)
+      .setValues([["ID Arbre", "Espèce", "Secteur", "Adresse", "Année", "Intervention"]])
+      .setFontWeight("bold").setFontSize(FONT_BODY).setWrap(true).setVerticalAlignment("middle");
+    if (pdfRows.length) {
+      tmp.getRange(tableStart + 1, 1, pdfRows.length, 6).setValues(pdfRows)
+        .setFontSize(FONT_BODY).setWrap(true).setVerticalAlignment("top");
+      pdfRows.forEach((row, i) => {
+        tmp.setRowHeight(tableStart + 1 + i, estimateRowHeight_(row[5], 40, 24) + 12);
+      });
+    } else {
+      tmp.getRange(tableStart + 1, 1, 1, 6).merge()
+        .setValue(`Aucune intervention enregistrée pour l’année ${y} dans les données consultées.`)
+        .setFontSize(FONT_BODY).setWrap(true).setVerticalAlignment("top");
+      tmp.setRowHeight(tableStart + 1, 70);
+    }
+    SpreadsheetApp.flush();
+
+    const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm");
+    const fileName = `Historique_Travaux_${y}_${now}.pdf`;
+    const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export` +
+      `?format=pdf&gid=${tmp.getSheetId()}&portrait=true&fitw=true` +
+      `&top_margin=${PDF_MARGIN_INCH}&bottom_margin=${PDF_MARGIN_INCH}` +
+      `&left_margin=${PDF_MARGIN_INCH}&right_margin=${PDF_MARGIN_INCH}` +
+      "&sheetnames=false&printtitle=false&fzr=false&gridlines=false&pagenumbers=true";
+    const response = UrlFetchApp.fetch(url, {
+      headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() }
+    });
+    const blob = response.getBlob().setName(fileName);
+    if (blob.getContentType() !== "application/pdf") {
+      const bytes = blob.getBytes();
+      if (bytes.slice(0, 5).map(b => String.fromCharCode(b)).join("") !== "%PDF-") throw new Error("REPONSE_PDF_INVALIDE");
+    }
+    const file = DriveApp.getFolderById(DRIVE_FOLDER_ID).createFile(blob);
+    return {
+      ok: true, url: file.getUrl(), fileUrl: file.getUrl(), name: fileName,
+      count: result.count, historiqueCount: result.historiqueCount,
+      travauxCount: result.travauxCount, undatedHistoryCount: result.undatedHistoryCount
+    };
+  } finally {
+    if (tmp) {
+      try { ss.deleteSheet(tmp); } catch (cleanupError) { Logger.log("Nettoyage export annuel : " + cleanupError); }
+    }
+  }
+}
+
+
+/* =========================
+   FEUILLES MÉTIER
+========================= */
+const SHEET_SURVEILLANCE = "Arbres_à_surveiller";
+const SHEET_ABATTAGES = "Abattages";
+const SHEET_ELAGAGES = "Elagages";
+const ETAT_COLORS = {
+  "A remplacer": "#000000",
+  "A surveiller": "#FFE0B2", "Dangereux (A abattre)": "#FFCDD2",
+  "A élaguer (URGENT)": "#FFF9C4", "A élaguer (Moyen)": "#BBDEFB", "A élaguer (Faible)": "#C8E6C9"
+};
+
+function findRowByIdPatrimoine_(sheet, treeId) {
+  const last = sheet.getLastRow();
+  if (last < 2) return -1;
+  const ids = sheet.getRange(2, 2, last - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]).trim() === String(treeId).trim()) return i + 2;
+  return -1;
+}
+
+function findRowById_(sheet, treeId) {
+  const last = sheet.getLastRow();
+  if (last < 2) return -1;
+  const ids = sheet.getRange(2, 1, last - 1, 1).getValues();
+  for (let i = 0; i < ids.length; i++) if (String(ids[i][0]).trim() === treeId) return i + 2;
+  return -1;
+}
+
+function colorRow_(sheet, rowIndex, etat) {
+  const color = ETAT_COLORS[etat];
+  if (color) sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).setBackground(color)
+    .setFontColor(etat === "A remplacer" ? "#ffffff" : "#000000");
+}
+
+function syncSurveillance_(data) {
+  const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_SURVEILLANCE);
+  if (!sheet) return;
+  const id = String(data.id || "").trim(), etat = String(data.etat || "").trim();
+  if (!id) return;
+  const rowIndex = findRowByIdPatrimoine_(sheet, id);
+  if (etat !== "A surveiller") { if (rowIndex !== -1) sheet.deleteRow(rowIndex); return; }
+  const row = [
+    new Date(), id, data.lat || "", data.lng || "", data.species || "", data.height || "", data.dbh || "",
+    data.secteur || "", data.address || "", (data.tags || []).join(","), data.historiqueInterventions || "",
+    data.comment || "", JSON.stringify(data.photos || []), etat, Date.now()
+  ];
+  if (rowIndex === -1) { sheet.appendRow(row); colorRow_(sheet, sheet.getLastRow(), etat); }
+  else { sheet.getRange(rowIndex, 1, 1, row.length).setValues([row]); colorRow_(sheet, rowIndex, etat); }
+}
+
+function syncTravauxPartiel_(data, sheetName) {
+  const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(sheetName);
+  if (!sheet) return;
+  const id = String(data.id || "").trim();
+  const etat = String(data.etat || "").trim();
+  if (!id) return;
+  const row = [
+    id, etat, data.secteur || "", data.dateDemande || "", data.natureTravaux || "", data.address || "", data.species || "",
+    data.dateDemandeDevis || "", data.devisNumero || "", data.montantDevis || "", data.dateExecution || "",
+    data.remarquesTravaux || "", data.numeroBDC || "", data.numeroFacture || ""
+  ];
+  let rowIndex = findRowById_(sheet, id);
+  if (rowIndex === -1) { sheet.appendRow(row); rowIndex = sheet.getLastRow(); }
+  else {
+    const range = sheet.getRange(rowIndex, 1, 1, row.length);
+    const merged = range.getValues()[0].map((cell, i) => cell !== "" && cell !== null ? cell : (row[i] || ""));
+    range.setValues([merged]);
+  }
+  colorRow_(sheet, rowIndex, String(sheet.getRange(rowIndex, 2).getValue() || "").trim());
+}
+
+function recolorElagages_() {
+  const sheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(SHEET_ELAGAGES);
+  if (!sheet || sheet.getLastRow() < 2) return;
+  sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues().forEach((row, i) => colorRow_(sheet, i + 2, String(row[0] || "").trim()));
+}
+
+function syncAbattages_(data) {
+  if (String(data.etat || "").trim() === "Dangereux (A abattre)") syncTravauxPartiel_(data, SHEET_ABATTAGES);
+}
+
+function syncElagages_(data) {
+  if (["A élaguer (URGENT)", "A élaguer (Moyen)", "A élaguer (Faible)"].includes(String(data.etat || "").trim())) syncTravauxPartiel_(data, SHEET_ELAGAGES);
+}
+
+function exportSheetToPDF_(sheetName, filePrefix, meta) {
+  assertAdmin_(meta);
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const source = ss.getSheetByName(sheetName);
+  if (!source) throw new Error("SHEET_INTROUVABLE");
+  const tmpName = "TMP_EXPORT_" + sheetName;
+  const old = ss.getSheetByName(tmpName);
+  if (old) ss.deleteSheet(old);
+  const tmp = source.copyTo(ss).setName(tmpName);
+  SpreadsheetApp.flush();
+  const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd_HH-mm");
+  const fileName = `${filePrefix}_${now}.pdf`;
+  const url = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=pdf&gid=${tmp.getSheetId()}` +
+    "&portrait=true&fitw=true&sheetnames=false&printtitle=false&fzr=false&gridlines=false";
+  const blob = UrlFetchApp.fetch(url, { headers: { Authorization: "Bearer " + ScriptApp.getOAuthToken() } }).getBlob().setName(fileName);
+  const file = DriveApp.getFolderById(DRIVE_FOLDER_ID).createFile(blob);
+  ss.deleteSheet(tmp);
+  return { ok: true, fileUrl: file.getUrl(), name: fileName };
+}
+
+function exportArbresASurveillerPDF_(meta) { assertAdmin_(meta); return exportSheetToPDF_(SHEET_SURVEILLANCE, "Arbres_a_surveiller", meta); }
+function exportAbattagesPDF_(meta) { assertAdmin_(meta); return exportSheetToPDF_(SHEET_ABATTAGES, "Abattages", meta); }
+function exportElagagesPDF_(meta) { assertAdmin_(meta); return exportSheetToPDF_(SHEET_ELAGAGES, "Elagages", meta); }
+
+function CLEAN_ORPHAN_TREE_FOLDERS() {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_PATRIMOINE);
+  if (!sheet) throw new Error("SHEET_PATRIMOINE_INTROUVABLE");
+  const validIds = new Set();
+  if (sheet.getLastRow() > 1) {
+    sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues().forEach(r => { if (r[0]) validIds.add(String(r[0]).trim()); });
+  }
+  Logger.log("🌳 Arbres actifs : " + validIds.size);
+  const folders = DriveApp.getFolderById(DRIVE_FOLDER_ID).getFolders();
+  let deleted = 0, kept = 0;
+  while (folders.hasNext()) {
+    const folder = folders.next(), name = String(folder.getName()).trim();
+    if (!name || !validIds.has(name)) { folder.setTrashed(true); deleted++; Logger.log("🗑️ Dossier supprimé : " + name); }
+    else kept++;
+  }
+  Logger.log("✅ Nettoyage terminé");
+  Logger.log("🗑️ Dossiers supprimés : " + deleted);
+  Logger.log("📁 Dossiers conservés : " + kept);
+}
+/* Rappels d'élagage : dates enregistrées dans le classeur et contrôle quotidien. */
+const RAPPEL_ELAGAGE_ANNEES = 5;
+const RAPPEL_ELAGAGE_FUSEAU = "Europe/Paris";
+const RAPPEL_ELAGAGE_HANDLER = "ENVOYER_RAPPELS_ELAGAGE";
+
+function rappelElagageColonnes_(sheet, create = false) {
+  const names = ["dernierElagageDate", "rappelElagageActif", "rappelElagageEnvoyePour"];
+  let width = sheet.getLastColumn();
+  const headers = width ? sheet.getRange(1, 1, 1, width).getValues()[0] : [];
+  const cols = {};
+  names.forEach(name => {
+    let index = headers.findIndex(h => String(h || "").trim().toLowerCase() === name.toLowerCase());
+    if (index === -1 && create) {
+      const column = Math.max(width, 15) + 1;
+      if (sheet.getMaxColumns() < column) sheet.insertColumnsAfter(sheet.getMaxColumns(), column - sheet.getMaxColumns());
+      sheet.getRange(1, column).setValue(name);
+      headers[column - 1] = name;
+      width = column;
+      index = column - 1;
+    }
+    cols[name] = index === -1 ? 0 : index + 1;
+  });
+  return cols;
+}
+
+function rappelElagageAujourdhui_() {
+  return Utilities.formatDate(new Date(), RAPPEL_ELAGAGE_FUSEAU, "yyyy-MM-dd");
+}
+
+function rappelElagageNature_(value) {
+  const text = String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  return /\b(elagage|elaguer|elague|elaguee|taille|tailler|taillee)s?\b/.test(text) && !/\b(abattage|dessouchage)\b/.test(text);
+}
+
+function rappelElagageDernierHistorique_(history, timeZone, today, etatValidation = "") {
+  const entries = annuelHistorique_(history, timeZone);
+  let last = "";
+  entries.forEach((entry, i) => {
+    const nature = entry.fields.natureTravaux || "";
+    const pruning = rappelElagageNature_(nature) || (!nature && i === entries.length - 1 && String(etatValidation).startsWith("A élaguer"));
+    if (pruning && entry.execution && entry.execution.iso <= today && entry.execution.iso > last) last = entry.execution.iso;
+  });
+  return last;
+}
+
+function rappelElagageEcheance_(iso) {
+  if (!iso) return "";
+  const parts = iso.split("-").map(Number);
+  const year = parts[0] + RAPPEL_ELAGAGE_ANNEES;
+  const day = Math.min(parts[2], new Date(Date.UTC(year, parts[1], 0)).getUTCDate());
+  return `${year}-${String(parts[1]).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function rappelElagageInfos_(row, cols, timeZone, today) {
+  const rawDate = cols.dernierElagageDate ? row[cols.dernierElagageDate - 1] : "";
+  const stored = annuelDate_(rawDate, timeZone);
+  const last = stored ? stored.iso : rappelElagageDernierHistorique_(row[10], timeZone, today);
+  const rawActive = cols.rappelElagageActif ? row[cols.rappelElagageActif - 1] : "";
+  const configured = rawActive !== "" && rawActive !== undefined && rawActive !== null;
+  const active = configured ? validationEntrepriseBoolean_(rawActive) : !!last;
+  const next = rappelElagageEcheance_(last);
+  const etat = String(row[13] || "").trim();
+  const suspended = etat === "A remplacer" || etat === "Dangereux (A abattre)";
+  const sent = cols.rappelElagageEnvoyePour ? annuelDate_(row[cols.rappelElagageEnvoyePour - 1], timeZone) : null;
+  return {
+    dernierElagageDate: last, prochainElagageDate: next, rappelElagageActif: active,
+    rappelElagageConfigure: configured,
+    rappelElagageStatut: !active ? "inactif" : suspended ? "suspendu" : !last ? "date_manquante" : next <= today ? "a_programmer" : "a_venir",
+    rappelElagageEnvoyePour: sent ? sent.iso : ""
+  };
+}
+
+function rappelElagagePreparer_(sheet, before, data, meta) {
+  if (!meta || String(meta.role || "").toLowerCase() !== "admin") return null;
+  const tz = SpreadsheetApp.openById(SPREADSHEET_ID).getSpreadsheetTimeZone();
+  const today = rappelElagageAujourdhui_();
+  let last = before ? before.dernierElagageDate : "";
+  let active = before ? before.rappelElagageActif : false;
+  let changed = false;
+  const configRequested = validationEntrepriseBoolean_(data.rappelElagageConfigModifiee) ||
+    (!before && Object.prototype.hasOwnProperty.call(data, "dernierElagageDate"));
+  if (configRequested) {
+    const date = annuelDate_(data.dernierElagageDate, tz);
+    active = validationEntrepriseBoolean_(data.rappelElagageActif);
+    if (active && !date) throw new Error("DATE_DERNIER_ELAGAGE_REQUISE");
+    if (date && date.iso > today) throw new Error("DATE_DERNIER_ELAGAGE_FUTURE");
+    last = date ? date.iso : "";
+    changed = true;
+  }
+  const previousEtat = before ? before.etat : data.etat;
+  if (validationEntrepriseBoolean_(data.validationEntrepriseResetRequested) &&
+      previousEtat !== "Dangereux (A abattre)" && previousEtat !== "A remplacer" && data.etat !== "A remplacer") {
+    const performed = rappelElagageDernierHistorique_(data.historiqueInterventions, tz, today, previousEtat);
+    if (performed && performed > last) {
+      last = performed;
+      if ((!before || !before.rappelElagageConfigure) && !configRequested) active = true;
+      changed = true;
+    }
+  }
+  return changed ? { dernierElagageDate: last, rappelElagageActif: active } : null;
+}
+
+function rappelElagageEcrire_(sheet, rowIndex, update) {
+  if (!update) return;
+  const cols = rappelElagageColonnes_(sheet, true);
+  sheet.getRange(rowIndex, cols.dernierElagageDate).setValue(update.dernierElagageDate || "");
+  sheet.getRange(rowIndex, cols.rappelElagageActif).setValue(update.rappelElagageActif === true);
+}
+
+function rappelElagageEmailValide_(email) {
+  return /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/.test(String(email || "").trim());
+}
+
+function getRappelsElagageConfig_(meta) {
+  assertAdmin_(meta);
+  let installed = false;
+  try { installed = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === RAPPEL_ELAGAGE_HANDLER); } catch (e) {}
+  return {
+    email: TOKEN_STORE.getProperty("ELAGAGE_EMAIL_DESTINATAIRE") || "",
+    emailActif: TOKEN_STORE.getProperty("ELAGAGE_EMAIL_ACTIF") === "true",
+    declencheurInstalle: installed
+  };
+}
+
+function saveRappelsElagageConfig_(data, meta) {
+  assertAdmin_(meta);
+  const email = String(data.email || "").trim();
+  const enabled = validationEntrepriseBoolean_(data.emailActif);
+  if ((enabled || email) && !rappelElagageEmailValide_(email)) throw new Error("ADRESSE_EMAIL_INVALIDE");
+  TOKEN_STORE.setProperty("ELAGAGE_EMAIL_DESTINATAIRE", email);
+  TOKEN_STORE.setProperty("ELAGAGE_EMAIL_ACTIF", String(enabled));
+  return getRappelsElagageConfig_(meta);
+}
+
+// À exécuter une fois depuis l'éditeur Apps Script, avec le compte propriétaire.
+// Cette fonction installe le contrôle quotidien ; elle n'envoie pas d'e-mail.
+function INSTALLER_RAPPELS_ELAGAGE() {
+  const existing = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === RAPPEL_ELAGAGE_HANDLER);
+  if (!existing) {
+    ScriptApp.newTrigger(RAPPEL_ELAGAGE_HANDLER).timeBased().everyDays(1).atHour(8).inTimezone(RAPPEL_ELAGAGE_FUSEAU).create();
+  }
+  Logger.log("Rappels d’élagage installés : contrôle quotidien le matin, heure de Paris. Configurez l’adresse et activez les e-mails dans l’application.");
+}
+
+function ENVOYER_RAPPELS_ELAGAGE() {
+  if (TOKEN_STORE.getProperty("ELAGAGE_EMAIL_ACTIF") !== "true") return;
+  const recipient = TOKEN_STORE.getProperty("ELAGAGE_EMAIL_DESTINATAIRE") || "";
+  if (!rappelElagageEmailValide_(recipient)) return;
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return;
+  try {
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName(SHEET_PATRIMOINE);
+    if (!sheet || sheet.getLastRow() < 2) return;
+    const tz = ss.getSpreadsheetTimeZone();
+    const today = rappelElagageAujourdhui_();
+    const cols = rappelElagageColonnes_(sheet);
+    const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+    const due = [];
+    rows.forEach(row => {
+      const info = rappelElagageInfos_(row, cols, tz, today);
+      if (row[1] && info.rappelElagageStatut === "a_programmer" && info.rappelElagageEnvoyePour !== info.prochainElagageDate) {
+        due.push({ id: String(row[1]).trim(), species: row[4] || "", secteur: row[7] || "", address: row[8] || "", next: info.prochainElagageDate });
+      }
+    });
+    if (!due.length || MailApp.getRemainingDailyQuota() < 1) return;
+    const display = iso => iso.split("-").reverse().join("/");
+    const body = [
+      "Rappel d’élagage — patrimoine arboré",
+      "Les arbres suivants ont atteint leur échéance de cinq ans depuis le dernier élagage enregistré.", "",
+      ...due.map(t => `Arbre ${t.id} — ${t.species}\nSecteur : ${t.secteur}\nAdresse : ${t.address}\nÉchéance : ${display(t.next)}\nFiche : ${BASE_FICHE_URL}?id=${encodeURIComponent(t.id)}\n`),
+      "L’alerte reste visible dans l’application jusqu’à mise à jour. Après un nouvel élagage validé, une nouvelle échéance est calculée à cinq ans."
+    ].join("\n");
+    MailApp.sendEmail({ to: recipient, subject: `Élagage à programmer — ${due.length} arbre${due.length > 1 ? "s" : ""}`, body: body });
+    const writeCols = rappelElagageColonnes_(sheet, true);
+    // Retrouver chaque arbre par ID : un tri peut avoir déplacé sa ligne.
+    const ids = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues();
+    due.forEach(tree => {
+      const index = ids.findIndex(row => String(row[0]).trim() === tree.id);
+      if (index !== -1) sheet.getRange(index + 2, writeCols.rappelElagageEnvoyePour).setValue(tree.next);
+    });
+    SpreadsheetApp.flush();
+  } catch (error) {
+    Logger.log("Rappels d’élagage : " + error);
+    throw error;
+  } finally {
+    lock.releaseLock();
+  }
+}
